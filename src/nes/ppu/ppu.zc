@@ -1,0 +1,297 @@
+import "../../types.zc";
+import "../../gamepak/gamepak.zc";
+import "./vram_address.zc";
+
+// NTSC timing: 262 scanlines of 341 dots, one dot per master clock cycle
+def PPU_DOTS_PER_SCANLINE: u16 = 341;
+def PPU_SCANLINES_PER_FRAME: u16 = 262;
+def PPU_VISIBLE_SCANLINES: u16 = 240;     // 0-239 are drawn
+def PPU_VBLANK_SCANLINE: u16 = 241;      // vblank starts at its dot 1
+def PPU_PRE_RENDER_SCANLINE: u16 = 261;  // vblank ends at its dot 1
+
+// PPUSTATUS bits
+def PPU_STATUS_SPRITE_OVERFLOW: byte = 0x20;
+def PPU_STATUS_SPRITE_ZERO_HIT: byte = 0x40;
+def PPU_STATUS_VBLANK: byte = 0x80;
+
+// PPUCTRL bit 7: raise an NMI when vblank starts
+def PPU_CONTROL_NMI: byte = 0x80;
+// PPUCTRL bit 2: after each PPUDATA access, v goes down a row (32) instead of across (1)
+def PPU_CONTROL_INCREMENT_32: byte = 0x04;
+// PPUCTRL bit 3: 8x8 sprites take their tiles from 0x1000 instead of 0x0000
+def PPU_CONTROL_SPRITE_TABLE: byte = 0x08;
+// PPUCTRL bit 4: the background takes its tiles from 0x1000 instead of 0x0000
+def PPU_CONTROL_BACKGROUND_TABLE: byte = 0x10;
+// PPUCTRL bit 5: sprites are 8x16 instead of 8x8
+def PPU_CONTROL_SPRITE_8X16: byte = 0x20;
+
+// PPUMASK bits
+def PPU_MASK_GREYSCALE: byte = 0x01;
+def PPU_MASK_BACKGROUND_LEFT: byte = 0x02;  // draw the background in the 8 leftmost pixels
+def PPU_MASK_SPRITES_LEFT: byte = 0x04;     // draw sprites in the 8 leftmost pixels
+def PPU_MASK_BACKGROUND: byte = 0x08;
+def PPU_MASK_SPRITES: byte = 0x10;
+
+// The registers the CPU sees at 0x2000-0x2007 (mirrored up to 0x3FFF)
+def PPU_CTRL: Address = 0x2000;
+def PPU_MASK: Address = 0x2001;
+def PPU_STATUS: Address = 0x2002;
+def PPU_OAM_ADDR: Address = 0x2003;
+def PPU_OAM_DATA: Address = 0x2004;
+def PPU_SCROLL: Address = 0x2005;
+def PPU_ADDR: Address = 0x2006;
+def PPU_DATA: Address = 0x2007;
+
+// The PPU's own bus is 14 bits: 0x0000-0x3FFF, higher addresses mirror it
+def PPU_ADDRESS_MASK: Address = 0x3FFF;
+def PATTERN_TABLES_END: Address = 0x1FFF;  // 0x0000-0x1FFF: CHR of the cartridge
+def NAME_TABLES_END: Address = 0x3EFF;     // 0x2000-0x2FFF, and 0x3000-0x3EFF mirrors it
+                                           // 0x3F00-0x3FFF: palette
+def NAME_TABLES_SIZE = 0x1000;             // 4 KB: the console has 2, four-screen cartridges add 2
+def PALETTE_SIZE = 32;
+def OAM_SIZE = 256;                        // 64 sprites of 4 bytes: Y, tile, attributes, X
+def SPRITES_PER_SCANLINE = 8;
+
+// Byte 2 of a sprite in OAM
+def SPRITE_PALETTE: byte = 0x03;           // sprite palette 0-3 (palettes 4-7 overall)
+def SPRITE_BEHIND_BACKGROUND: byte = 0x20;
+def SPRITE_FLIP_HORIZONTAL: byte = 0x40;
+def SPRITE_FLIP_VERTICAL: byte = 0x80;
+
+// A sprite found on a scanline, with its row of pixels already fetched:
+// what the next scanline draws
+@derive(Copy)
+struct LineSprite {
+    x: byte;
+    attributes: byte;
+    patternLow: byte;     // bit 0 of its 8 pixels, already flipped
+    patternHigh: byte;    // bit 1 of its 8 pixels, already flipped
+    isSpriteZero: bool;   // OAM sprite 0: the only one that sets the sprite 0 hit
+}
+
+// The NES picture processing unit (Ricoh 2C02)
+struct Ppu {
+    control: byte;      // PPUCTRL (0x2000)
+    mask: byte;         // PPUMASK (0x2001)
+    status: byte;       // PPUSTATUS (0x2002)
+    v: VramAddress;     // current VRAM address: PPUDATA accesses it, rendering walks it
+    t: VramAddress;     // VRAM address PPUSCROLL and PPUADDR build; copied into v
+    fineX: byte;        // pixel inside the tile for the X scroll (0-7)
+    writeLatch: bool;   // false: next PPUSCROLL/PPUADDR write is the first one
+    readBuffer: byte;   // what the previous PPUDATA read fetched; the next one returns it
+    oamAddress: byte;   // OAMADDR: the OAM byte OAMDATA reads or writes next
+
+    scanline: u16;      // 0-239 visible, 240 idle, 241-260 vblank, 261 pre-render
+    dot: u16;           // 0-340 inside the scanline
+    frameNumber: u32;
+
+    frameComplete: bool;  // set when the last dot of a frame passes; read once
+    nmiRequested: bool;   // set when vblank starts with PPUCTRL bit 7; read once
+
+    gamePak: GamePak*;    // pattern tables (CHR) and mirroring; owned by whoever loaded the ROM
+    nameTables: byte[NAME_TABLES_SIZE]; // background layout: tile ids and attributes
+    palette: byte[PALETTE_SIZE];        // color indexes into the NES master palette
+    oam: byte[OAM_SIZE];                // sprites: what is drawn on top of the background
+
+    // Background: the next tile, fetched over 8 dots...
+    nextTileId: byte;
+    nextAttribute: byte;      // its palette (0-3)
+    nextPatternLow: byte;     // bit 0 of each pixel of its row
+    nextPatternHigh: byte;    // bit 1 of each pixel of its row
+    // ...and 16 pixels in shift registers: the tile being drawn in the high
+    // byte, the next one in the low byte. They move one bit per dot
+    patternShiftLow: u16;
+    patternShiftHigh: u16;
+    attributeShiftLow: u16;
+    attributeShiftHigh: u16;
+
+    // Sprites: up to 8 per scanline, found at the end of the previous one
+    lineSprites: LineSprite[SPRITES_PER_SCANLINE];
+    lineSpriteCount: byte;
+
+    oddFrame: bool;     // odd frames are one dot shorter while rendering
+    frame: Frame;       // the picture being drawn
+}
+
+// Where an address of 0x2000-0x3EFF lands inside nameTables.
+// The PPU sees four 1 KB tables (0x2000, 0x2400, 0x2800, 0x2C00); the
+// cartridge decides which address bit picks between the console's two.
+fn nameTableIndex(mirroring: byte, address: Address) -> u16 {
+    let offset: u16 = address & 0x0FFF;   // 0x3000-0x3EFF folds onto 0x2000-0x2EFF
+    match mirroring {
+        VERTICAL_MIRRORING => return offset & 0x07FF,                              // A B / A B: bit 10 picks
+        HORIZONTAL_MIRRORING => return ((offset >> 1) & 0x0400) | (offset & 0x03FF), // A A / B B: bit 11 picks
+        ONE_SCREEN_MIRRORING => return offset & 0x03FF,                            // all four are A
+        _ => return offset,                                                        // four-screen: four real tables
+    }
+}
+
+// Where an address of 0x3F00-0x3FFF lands inside palette: 32 bytes, mirrored
+// every 0x20. The first colour of each sprite palette (0x3F10/14/18/1C) is the
+// same byte as the one of the background palette below it (0x3F00/04/08/0C).
+fn paletteIndex(address: Address) -> u16 {
+    let index: u16 = address & 0x001F;
+    if index >= 0x10 && (index & 0x03) == 0 {
+        return index - 0x10;
+    }
+    return index;
+}
+
+impl Ppu {
+    fn create(gamePak: GamePak*) -> Ppu {
+        return Ppu{ gamePak: gamePak };
+    }
+
+    // One PPU dot: one master clock cycle
+    fn tick(self) {
+        self.renderDot();
+
+        if self.scanline == PPU_VBLANK_SCANLINE && self.dot == 1 {
+            self.status |= PPU_STATUS_VBLANK;
+            if (self.control & PPU_CONTROL_NMI) != 0 {
+                self.nmiRequested = true;
+            }
+        } else if self.scanline == PPU_PRE_RENDER_SCANLINE && self.dot == 1 {
+            self.status &= ~(PPU_STATUS_VBLANK | PPU_STATUS_SPRITE_ZERO_HIT | PPU_STATUS_SPRITE_OVERFLOW);
+        }
+
+        self.dot += 1;
+        // On odd frames, while rendering, the pre-render scanline skips its last dot
+        if self.scanline == PPU_PRE_RENDER_SCANLINE && self.dot == PPU_DOTS_PER_SCANLINE - 1
+            && self.oddFrame && self.renderingEnabled() {
+            self.dot += 1;
+        }
+        if self.dot == PPU_DOTS_PER_SCANLINE {
+            self.dot = 0;
+            self.scanline += 1;
+            if self.scanline == PPU_SCANLINES_PER_FRAME {
+                self.scanline = 0;
+                self.frameNumber += 1;
+                self.oddFrame = !self.oddFrame;
+                self.frameComplete = true;
+            }
+        }
+    }
+
+    // A read by the CPU. `address` is already 0x2000-0x2007
+    fn readRegister(self, address: Address) -> byte {
+        if address == PPU_STATUS {
+            let value = self.status;
+            self.status &= ~PPU_STATUS_VBLANK;   // reading it ends the vblank flag
+            self.writeLatch = false;    // the next PPUSCROLL/PPUADDR write is the first one
+            return value;
+        }
+        if address == PPU_DATA {
+            let vramAddress: Address = self.v.value & PPU_ADDRESS_MASK;
+            let value = self.readBuffer;   // reads are one access late
+            if vramAddress > NAME_TABLES_END {
+                // The palette answers at once; the buffer gets the nametable byte underneath it
+                value = self.read(vramAddress);
+                self.readBuffer = self.read(vramAddress - 0x1000);
+            } else {
+                self.readBuffer = self.read(vramAddress);
+            }
+            self.v.increment(self.vramStep());
+            return value;
+        }
+        if address == PPU_OAM_DATA {
+            // Reading does not move OAMADDR
+            let value = self.oam[self.oamAddress];
+            if (self.oamAddress & 0x03) == 2 {
+                value &= 0xE3;   // attributes: bits 2-4 do not exist and read as 0
+            }
+            return value;
+        }
+        return 0;   // write-only registers
+    }
+
+    // A write by the CPU. `address` is already 0x2000-0x2007
+    fn writeRegister(self, address: Address, value: byte) {
+        if address == PPU_CTRL {
+            let nmiWasOff = (self.control & PPU_CONTROL_NMI) == 0;
+            self.control = value;
+            self.t.setNameTable(value & 0x03);
+
+            // Turning the NMI on inside vblank raises it at once
+            if nmiWasOff && (value & PPU_CONTROL_NMI) != 0 && (self.status & PPU_STATUS_VBLANK) != 0 {
+                self.nmiRequested = true;
+            }
+        } else if address == PPU_MASK {
+            self.mask = value;
+        } else if address == PPU_SCROLL {
+            if !self.writeLatch {
+                // First write: X scroll
+                self.t.setCoarseX(value >> 3);
+                self.fineX = value & 0x07;
+            } else {
+                // Second write: Y scroll
+                self.t.setCoarseY(value >> 3);
+                self.t.setFineY(value & 0x07);
+            }
+            self.writeLatch = !self.writeLatch;
+        } else if address == PPU_ADDR {
+            if !self.writeLatch {
+                self.t.setHighByte(value);
+            } else {
+                self.t.setLowByte(value);
+                self.v = self.t;   // the address is complete: PPUDATA uses it from now on
+            }
+            self.writeLatch = !self.writeLatch;
+        } else if address == PPU_DATA {
+            self.write(self.v.value, value);
+            self.v.increment(self.vramStep());
+        } else if address == PPU_OAM_ADDR {
+            self.oamAddress = value;
+        } else if address == PPU_OAM_DATA {
+            self.oam[self.oamAddress] = value;
+            self.oamAddress += 1;   // a byte: wraps from 255 to 0
+        }
+        // PPUSTATUS is read-only
+    }
+
+    // How far v moves after each PPUDATA access
+    fn vramStep(self) -> u16 {
+        if (self.control & PPU_CONTROL_INCREMENT_32) != 0 {
+            return 32;
+        }
+        return 1;
+    }
+
+    // A read on the PPU's own bus (0x0000-0x3FFF)
+    fn read(self, address: Address) -> byte {
+        address &= PPU_ADDRESS_MASK;
+        if address <= PATTERN_TABLES_END {
+            return self.gamePak.mapper.readChrROM(address);
+        }
+        if address <= NAME_TABLES_END {
+            return self.nameTables[nameTableIndex(self.gamePak.header.Mirroring(), address)];
+        }
+        return self.palette[paletteIndex(address)];
+    }
+
+    // A write on the PPU's own bus (0x0000-0x3FFF)
+    fn write(self, address: Address, value: byte) {
+        address &= PPU_ADDRESS_MASK;
+        if address <= PATTERN_TABLES_END {
+            self.gamePak.mapper.writeChrROM(address, value);   // ignored unless the cartridge has CHR RAM
+        } else if address <= NAME_TABLES_END {
+            self.nameTables[nameTableIndex(self.gamePak.header.Mirroring(), address)] = value;
+        } else {
+            self.palette[paletteIndex(address)] = value;
+        }
+    }
+
+    // Whether an NMI is pending, and clears it
+    fn takeNmi(self) -> bool {
+        let requested = self.nmiRequested;
+        self.nmiRequested = false;
+        return requested;
+    }
+
+    // Whether a frame was completed since the last call, and clears it
+    fn takeFrameComplete(self) -> bool {
+        let complete = self.frameComplete;
+        self.frameComplete = false;
+        return complete;
+    }
+}

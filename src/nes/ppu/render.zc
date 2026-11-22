@@ -1,0 +1,162 @@
+import "./ppu.zc";
+import "./system_palette.zc";
+import "./sprites.zc";
+
+// How the PPU draws the picture, dot by dot.
+// Timing from nesdev ("PPU rendering" and "PPU scrolling"):
+// - Each tile takes 8 dots: tile id (dot 1), attribute (3), low pattern (5),
+//   high pattern (7), and v moves to the next tile (8).
+// - The shift registers move one bit per dot (2-257 and 322-337) and take the
+//   next tile every 8 dots (9, 17... 257, and 329, 337).
+// - Dots 321-336 fetch the first two tiles of the next scanline, so the
+//   scanline starts with them already in the shifters.
+// - v moves down a pixel row at dot 256 and back to the left edge at 257; the
+//   pre-render scanline moves it back to the top edge (280-304).
+impl Ppu {
+    fn renderingEnabled(self) -> bool {
+        return (self.mask & (PPU_MASK_BACKGROUND | PPU_MASK_SPRITES)) != 0;
+    }
+
+    // What the PPU does for the picture on the current dot
+    fn renderDot(self) {
+        let visible = self.scanline < PPU_VISIBLE_SCANLINES;
+        if (visible || self.scanline == PPU_PRE_RENDER_SCANLINE) && self.renderingEnabled() {
+            self.fetchBackground();
+        }
+        if self.dot == 257 {
+            // The sprites of the next scanline. The pre-render scanline finds
+            // none, so scanline 0 has no sprites
+            if visible && self.renderingEnabled() {
+                self.evaluateSprites();
+            } else {
+                self.lineSpriteCount = 0;
+            }
+        }
+        if visible && self.dot >= 1 && self.dot <= 256 {
+            self.drawPixel((int)self.dot - 1, (int)self.scanline);
+        }
+    }
+
+    fn fetchBackground(self) {
+        let dot = self.dot;
+
+        if (dot >= 2 && dot <= 257) || (dot >= 322 && dot <= 337) {
+            self.shiftBackground();
+        }
+        if (dot >= 9 && dot <= 257 && dot % 8 == 1) || dot == 329 || dot == 337 {
+            self.loadBackgroundShifters();
+        }
+
+        if (dot >= 1 && dot <= 256) || (dot >= 321 && dot <= 336) {
+            match dot % 8 {
+                1 => { self.nextTileId = self.read(self.v.tileAddress()); },
+                3 => { self.nextAttribute = self.fetchAttribute(); },
+                5 => { self.nextPatternLow = self.read(self.patternAddress()); },
+                7 => { self.nextPatternHigh = self.read(self.patternAddress() + 8); },
+                0 => { self.v.incrementCoarseX(); },
+                _ => {},
+            }
+        }
+
+        if dot == 256 {
+            self.v.incrementY();
+        } else if dot == 257 {
+            self.v.copyHorizontal(self.t);
+        } else if self.scanline == PPU_PRE_RENDER_SCANLINE && dot >= 280 && dot <= 304 {
+            self.v.copyVertical(self.t);
+        }
+    }
+
+    // The palette (0-3) of the tile v points at. One attribute byte covers
+    // 4x4 tiles, 2 bits per 2x2 tiles:
+    //   bits 1-0 top left, 3-2 top right, 5-4 bottom left, 7-6 bottom right
+    fn fetchAttribute(self) -> byte {
+        let attribute = self.read(self.v.attributeAddress());
+        if (self.v.coarseY() & 0x02) != 0 {
+            attribute >>= 4;   // bottom half
+        }
+        if (self.v.coarseX() & 0x02) != 0 {
+            attribute >>= 2;   // right half
+        }
+        return attribute & 0x03;
+    }
+
+    // The low plane of the current pixel row of the next tile: 16 bytes per
+    // tile, the low plane in the first 8 and the high plane in the next 8
+    fn patternAddress(self) -> Address {
+        let table: Address = 0x0000;
+        if (self.control & PPU_CONTROL_BACKGROUND_TABLE) != 0 {
+            table = 0x1000;
+        }
+        return table + ((Address)self.nextTileId << 4) + (Address)self.v.fineY();
+    }
+
+    fn shiftBackground(self) {
+        self.patternShiftLow <<= 1;
+        self.patternShiftHigh <<= 1;
+        self.attributeShiftLow <<= 1;
+        self.attributeShiftHigh <<= 1;
+    }
+
+    // The next tile goes into the low byte of the shifters. Its palette is the
+    // same for its 8 pixels, so each of its 2 bits fills a whole byte
+    fn loadBackgroundShifters(self) {
+        self.patternShiftLow = (self.patternShiftLow & 0xFF00) | (u16)self.nextPatternLow;
+        self.patternShiftHigh = (self.patternShiftHigh & 0xFF00) | (u16)self.nextPatternHigh;
+
+        self.attributeShiftLow &= 0xFF00;
+        if (self.nextAttribute & 0x01) != 0 {
+            self.attributeShiftLow |= 0x00FF;
+        }
+        self.attributeShiftHigh &= 0xFF00;
+        if (self.nextAttribute & 0x02) != 0 {
+            self.attributeShiftHigh |= 0x00FF;
+        }
+    }
+
+    fn drawPixel(self, x: int, y: int) {
+        let pixel: byte = 0;          // 0-3: which colour of the palette; 0 is transparent
+        let paletteNumber: byte = 0;  // 0-3 background palettes, 4-7 sprite palettes
+
+        let showBackground = (self.mask & PPU_MASK_BACKGROUND) != 0
+            && (x >= 8 || (self.mask & PPU_MASK_BACKGROUND_LEFT) != 0);
+        if showBackground {
+            // fineX picks the pixel inside the tile: the scroll within 8 pixels
+            let bit: u16 = (u16)0x8000 >> (u16)self.fineX;
+            if (self.patternShiftLow & bit) != 0 { pixel |= 0x01; }
+            if (self.patternShiftHigh & bit) != 0 { pixel |= 0x02; }
+            if (self.attributeShiftLow & bit) != 0 { paletteNumber |= 0x01; }
+            if (self.attributeShiftHigh & bit) != 0 { paletteNumber |= 0x02; }
+        }
+
+        let sprite = self.spritePixelAt(x);
+        if sprite.pixel != 0 && pixel != 0 && sprite.isSpriteZero && x != 255 {
+            // An opaque pixel of sprite 0 over an opaque background pixel
+            self.status |= PPU_STATUS_SPRITE_ZERO_HIT;
+        }
+        if sprite.pixel != 0 && (pixel == 0 || !sprite.behindBackground) {
+            pixel = sprite.pixel;
+            paletteNumber = sprite.paletteNumber;
+        }
+
+        self.frame.set(x, y, self.color(paletteNumber, pixel));
+    }
+
+    // The RGB colour of a pixel of a palette (0-3 background, 4-7 sprites).
+    // Pixel 0 of every palette is transparent: it shows the backdrop (0x3F00)
+    fn color(self, paletteNumber: byte, pixel: byte) -> Pixel {
+        let index: u16 = 0;
+        if pixel != 0 {
+            index = (u16)paletteNumber * 4 + (u16)pixel;
+        } else if !self.renderingEnabled() && (self.v.value & PPU_ADDRESS_MASK) > NAME_TABLES_END {
+            // With rendering off and v pointing into the palette, the backdrop
+            // is the colour v points at instead of 0x3F00
+            index = paletteIndex(self.v.value);
+        }
+        let color = self.palette[index] & 0x3F;   // palette entries are 6 bits
+        if (self.mask & PPU_MASK_GREYSCALE) != 0 {
+            color &= 0x30;   // only the grey column of each row
+        }
+        return SYSTEM_PALETTE[color];
+    }
+}

@@ -1,0 +1,43 @@
+// Buttons of a NES controller: one bit each in the byte the controller sends
+def CONTROLLER_A: u8 = 0x80;
+def CONTROLLER_B: u8 = 0x40;
+def CONTROLLER_SELECT: u8 = 0x20;
+def CONTROLLER_START: u8 = 0x10;
+def CONTROLLER_UP: u8 = 0x08;
+def CONTROLLER_DOWN: u8 = 0x04;
+def CONTROLLER_LEFT: u8 = 0x02;
+def CONTROLLER_RIGHT: u8 = 0x01;
+
+// A standard NES controller: a shift register the CPU reads one bit at a time.
+// The game writes 1 and then 0 to 0x4016 (strobe) to latch the buttons; then
+// each read of 0x4016 (controller 1) or 0x4017 (controller 2) gives the next
+// button, A first and Right last.
+struct Controller {
+    buttons: u8;    // what is pressed now, from the keyboard or gamepad
+    shift: u8;      // the buttons latched by the last strobe, still to be read
+    strobe: bool;   // while set, the register keeps reloading: reads give A
+}
+
+impl Controller {
+    // A write to 0x4016: bit 0 is the strobe
+    fn write(self, value: byte) {
+        self.strobe = (value & 0x01) != 0;
+        if self.strobe {
+            self.shift = self.buttons;
+        }
+    }
+
+    // A read of 0x4016 or 0x4017: the next button, 1 if pressed
+    fn read(self) -> byte {
+        if self.strobe {
+            self.shift = self.buttons;   // still reloading: always A
+        }
+        let pressed: byte = 0;
+        if (self.shift & CONTROLLER_A) != 0 {
+            pressed = 1;
+        }
+        // Ones come in behind: after the 8 buttons, an official controller reads 1
+        self.shift = (self.shift << 1) | 0x01;
+        return pressed;
+    }
+}

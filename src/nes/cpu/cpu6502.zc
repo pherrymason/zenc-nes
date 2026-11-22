@@ -1,0 +1,104 @@
+import "./operation_method.zc";
+import "./registers.zc";
+import "../memory.zc";
+
+
+struct EvaluatedAddress {
+    address: Address;
+    opcodeOperand: byte[3];
+    cycles: byte;
+    pageCrossed: bool;
+}
+
+// An instruction runs as a method of the CPU: Cpu6502::lda, Cpu6502::sta...
+// Returns true when the instruction may take an extra cycle if a page is crossed.
+alias OperationMethod = fn*(Cpu6502*, OperationMethodArgument) -> bool;
+
+struct Instruction {
+    name: string;
+    addressMode: AddressMode;
+    method: OperationMethod;
+    cycles: byte;
+    size: byte;
+}
+
+impl Instruction {
+    fn create(name: string, addressMode: AddressMode, method: OperationMethod, cycles: byte, size: byte) -> Instruction {
+        return Instruction{
+            name: name,
+            addressMode: addressMode,
+            method: method,
+            cycles: cycles,
+            size: size,
+        };
+    }
+}
+
+struct Cpu6502 {
+    registers: Registers;
+    memory: Memory;
+    instructions: Instruction[256];
+    opCyclesLeft: byte; // How many cycles left to finish execution of current cycle
+    cycle: uint32;
+    nmiPending: bool;   // the PPU asked for an NMI; runs before the next instruction
+    //debugger: *Debugger;
+}
+
+fn memoryPageDiffer(address: Address, finalAddress: Address) -> bool
+{
+    return (address & 0xFF00) != (finalAddress & 0xFF00);
+}
+
+impl Cpu6502 {
+    // Writes at 0x0100 + Sp, then moves Sp down to the next free slot
+    fn pushStack(self, value: byte) {
+        self.memory.write(self.registers.stackPointerAddress(), value);
+        self.registers.stackPointerPushed();
+    }
+
+    // Moves Sp up to the last pushed value, then reads it
+    fn popStack(self) -> byte {
+        self.registers.stackPointerPopped();
+        return self.memory.read(self.registers.stackPointerAddress());
+    }
+
+    // Pushes the high byte first, so the address sits little endian in the stack
+    fn pushAddress(self, address: Address) {
+        self.pushStack((byte)(address >> 8));
+        self.pushStack((byte)address);
+    }
+
+    // Pops what pushAddress pushed: low byte first, then high
+    fn popAddress(self) -> Address {
+        let low: byte = self.popStack();
+        let high: byte = self.popStack();
+
+        return Address::from(high, low);
+    }
+
+    // Reads a little endian word: low byte at address, high byte at address + 1
+    fn read16(self, address: Address) -> Word {
+        let low: byte = self.memory.read(address);
+        let high: byte = self.memory.read(address + 1);
+
+        return Address::from(high, low);
+    }
+
+    // Hardware bug of the NMOS 6502, inherited by the NES 2A03 (the 65C02
+    // fixed it): JMP ($xxFF) reads the high byte of the target from $xx00
+    // instead of $(xx+1)00, because the CPU increments only the low byte of
+    // the pointer. Like read16, but the high byte never leaves the page of
+    // address. Only JMP indirect uses it.
+    fn read16Bugged(self, address: Address) -> Word {
+        let lsb: Address = address;
+        let msb: Address = (lsb & 0xFF00) | ((lsb + 1) & 0x00FF);
+
+        let low: byte = self.memory.read(lsb);
+        let high: byte = self.memory.read(msb);
+
+        return Address::from(high, low);
+    }
+
+    fn isComplete(self) -> bool { return self.opCyclesLeft == 0; }
+
+}

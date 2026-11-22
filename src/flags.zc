@@ -1,0 +1,258 @@
+// Command line flags with the semantics of Go's `flag` package:
+//   -name  --name  -name=value  -name value  (bools: -name, -name=false)
+//   `--` or the first argument that is not a flag ends the flags; the rest
+//   are left in `FlagSet.rest`. `-h` / `-help` print the usage.
+//
+// Each flag writes into a variable of the caller (like flag.BoolVar), so
+// the values land directly in an options struct.
+
+import "std/io.zc"
+import "std/vec.zc"
+import "std/string.zc"
+
+enum FlagTarget {
+    Bool(bool*),
+    Int(int*),
+    Text(string*),
+}
+
+enum FlagValue {
+    Bool(bool),
+    Int(int),
+    Text(string),
+}
+
+struct Flag {
+    name: string;
+    usage: string;
+    target: FlagTarget;
+    fallback: FlagValue;
+}
+
+enum ParseOutcome {
+    Parsed,
+    HelpRequested,
+    Failed,
+}
+
+struct FlagSet {
+    program: string;
+    flags: Vec<Flag>;
+    rest: Vec<string>;
+    error: String;
+}
+
+impl FlagSet {
+    fn new(program: string) -> FlagSet {
+        return FlagSet {
+            program: program,
+            flags: Vec<Flag>::new(),
+            rest: Vec<string>::new(),
+            error: String::new(""),
+        };
+    }
+
+    fn bool_var(self, into: bool*, name: string, fallback: bool, usage: string) {
+        *into = fallback;
+        self.flags.push(Flag { name: name, usage: usage, target: FlagTarget::Bool(into), fallback: FlagValue::Bool(fallback) });
+    }
+
+    fn int_var(self, into: int*, name: string, fallback: int, usage: string) {
+        *into = fallback;
+        self.flags.push(Flag { name: name, usage: usage, target: FlagTarget::Int(into), fallback: FlagValue::Int(fallback) });
+    }
+
+    fn string_var(self, into: string*, name: string, fallback: string, usage: string) {
+        *into = fallback;
+        self.flags.push(Flag { name: name, usage: usage, target: FlagTarget::Text(into), fallback: FlagValue::Text(fallback) });
+    }
+
+    // Parses argv as received by main (argv[0] is the program). Like Go's
+    // flag.Parse: on error prints it with the usage and exits with 2; on
+    // -h/-help prints the usage and exits with 0.
+    fn parse(self, argc: int, argv: char**) {
+        let args = Vec<string>::new();
+        for i in 1..argc {
+            args.push(argv[i]);
+        }
+        match self.try_parse(&args) {
+            ParseOutcome::Parsed => {},
+            ParseOutcome::HelpRequested => {
+                self.print_usage();
+                exit(0);
+            },
+            ParseOutcome::Failed => {
+                eprintln(self.error.c_str());
+                self.print_usage();
+                exit(2);
+            },
+        }
+    }
+
+    // Parses the arguments without the program name; never exits. On
+    // `Failed`, `self.error` holds the message.
+    fn try_parse(self, args: Vec<string>*) -> ParseOutcome {
+        self.rest.clear();
+        let total = args.length();
+        let i: usize = 0;
+        while i < total {
+            let arg = args.get(i);
+            let arg_len = strlen(arg);
+            if arg_len < 2 || arg[0] != '-' {
+                break;
+            }
+            let dashes: usize = 1;
+            if arg[1] == '-' {
+                if arg_len == 2 {
+                    i = i + 1;   // "--" ends the flags and is consumed
+                    break;
+                }
+                dashes = 2;
+            }
+            let name = arg + dashes;
+            if name[0] == '-' || name[0] == '=' {
+                self.fail(f"bad flag syntax: {arg}");
+                return ParseOutcome::Failed;
+            }
+
+            let name_len = strlen(name);
+            let has_value = false;
+            let value: string = "";
+            for k in 0..name_len {
+                if name[k] == '=' {
+                    has_value = true;
+                    value = name + k + 1;
+                    name_len = k;
+                    break;
+                }
+            }
+
+            let found = self.find(name, name_len);
+            if found.is_none() {
+                if FlagSet::is_help(name, name_len) {
+                    return ParseOutcome::HelpRequested;
+                }
+                let full = String::new(name);
+                let shown = full.substring(0, name_len);
+                self.fail(f"flag provided but not defined: -{shown.c_str()}");
+                return ParseOutcome::Failed;
+            }
+            let flag = found.unwrap();
+
+            match flag.target {
+                FlagTarget::Bool(dest) => {
+                    if !has_value {
+                        *dest = true;
+                    } else {
+                        let parsed = FlagSet::parse_bool(value);
+                        if parsed.is_none() {
+                            self.fail(f"invalid boolean value \"{value}\" for -{flag.name}");
+                            return ParseOutcome::Failed;
+                        }
+                        *dest = parsed.unwrap();
+                    }
+                },
+                _ => {
+                    if !has_value {
+                        if i + 1 >= total {
+                            self.fail(f"flag needs an argument: -{flag.name}");
+                            return ParseOutcome::Failed;
+                        }
+                        i = i + 1;
+                        value = args.get(i);
+                    }
+                    if !self.assign(flag, value) {
+                        return ParseOutcome::Failed;
+                    }
+                },
+            }
+            i = i + 1;
+        }
+        while i < total {
+            self.rest.push(args.get(i));
+            i = i + 1;
+        }
+        return ParseOutcome::Parsed;
+    }
+
+    fn print_usage(self) {
+        eprintln(f"Usage of {self.program}:");
+        for i in 0..self.flags.length() {
+            let flag = self.flags.get_ref(i);
+            match flag.fallback {
+                FlagValue::Bool(b) => {
+                    eprintln(f"  -{flag.name}");
+                    eprintln(f"    \t{flag.usage}");
+                },
+                FlagValue::Int(n) => {
+                    eprintln(f"  -{flag.name} int");
+                    if n == 0 {
+                        eprintln(f"    \t{flag.usage}");
+                    } else {
+                        eprintln(f"    \t{flag.usage} (default {n})");
+                    }
+                },
+                FlagValue::Text(s) => {
+                    eprintln(f"  -{flag.name} string");
+                    if s[0] == 0 {
+                        eprintln(f"    \t{flag.usage}");
+                    } else {
+                        eprintln(f"    \t{flag.usage} (default \"{s}\")");
+                    }
+                },
+            }
+        }
+    }
+
+    fn find(self, name: string, name_len: usize) -> Option<Flag*> {
+        for i in 0..self.flags.length() {
+            let flag = self.flags.get_ref(i);
+            if strlen(flag.name) == name_len && strncmp(flag.name, name, name_len) == 0 {
+                return Option<Flag*>::Some(flag);
+            }
+        }
+        return Option<Flag*>::None();
+    }
+
+    fn assign(self, flag: Flag*, value: string) -> bool {
+        match flag.target {
+            FlagTarget::Int(dest) => {
+                let end: char* = NULL;
+                let parsed = strtol(value, &end, 0);
+                if value[0] == 0 || *end != 0 {
+                    self.fail(f"invalid value \"{value}\" for flag -{flag.name}: parse error");
+                    return false;
+                }
+                *dest = (int)parsed;
+            },
+            FlagTarget::Text(dest) => {
+                *dest = value;
+            },
+            _ => {},
+        }
+        return true;
+    }
+
+    fn fail(self, message: string) {
+        self.error.free();
+        self.error = String::new(message);
+    }
+
+    fn is_help(name: string, name_len: usize) -> bool {
+        return (name_len == 1 && strncmp(name, "h", 1) == 0)
+            || (name_len == 4 && strncmp(name, "help", 4) == 0);
+    }
+
+    // Same spellings as Go's strconv.ParseBool.
+    fn parse_bool(value: string) -> Option<bool> {
+        if strcmp(value, "1") == 0 || strcmp(value, "t") == 0 || strcmp(value, "T") == 0
+            || strcmp(value, "true") == 0 || strcmp(value, "TRUE") == 0 || strcmp(value, "True") == 0 {
+            return Option<bool>::Some(true);
+        }
+        if strcmp(value, "0") == 0 || strcmp(value, "f") == 0 || strcmp(value, "F") == 0
+            || strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0 || strcmp(value, "False") == 0 {
+            return Option<bool>::Some(false);
+        }
+        return Option<bool>::None();
+    }
+}

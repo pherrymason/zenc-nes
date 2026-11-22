@@ -1,0 +1,89 @@
+import "std/vec.zc";
+
+// Nametable mirroring. OneScreen is never in the header: some mappers switch to it at run time
+def HORIZONTAL_MIRRORING: byte = 0;
+def VERTICAL_MIRRORING: byte = 1;
+def ONE_SCREEN_MIRRORING: byte = 2;
+def FOUR_SCREEN_MIRRORING: byte = 3;
+
+struct InesHeader {
+    prgROMSize: byte;
+    chrROMSize: byte;
+    flags6: byte;
+    flags7: byte;
+    flags8: byte;
+    flags9: byte;
+    flags10: byte;
+}
+
+impl InesHeader {
+    fn create(prgROMSize: byte, chrROMSize: byte, flag6: byte, flag7: byte, flag8: byte, flag9: byte, flag10: byte) -> InesHeader {
+        return InesHeader{
+            prgROMSize: prgROMSize,
+            chrROMSize: chrROMSize,
+            flags6: flag6,
+            flags7: flag7,
+            flags8: flag8,
+            flags9: flag9,
+            flags10: flag10,
+        }
+    }
+
+    fn createFromRom(data: Vec<u8>*) -> InesHeader {
+        return InesHeader::create(
+            data.get(4),
+            data.get(5),
+            data.get(6),
+            data.get(7),
+            data.get(8),
+            data.get(9),
+            data.get(10)
+        );
+    } 
+
+    fn isNes2(self) -> bool { return (self.flags7 & 0x0C) == 0x08; }
+
+    fn ProgramSize(self) -> byte {
+        return self.prgROMSize;
+    }
+	fn CHRSize(self) -> byte {
+        return self.chrROMSize;
+    }
+    // Bit 0 of flags6, unless bit 3 asks for four screens
+	fn Mirroring(self) -> byte {
+        if (self.IgnoreMirroringControl()) {
+            return FOUR_SCREEN_MIRRORING;
+        }
+        return (byte)(self.flags6 & 0x01);
+    }
+
+    // Bit 1 of flags6: battery-backed PRG RAM at $6000-$7FFF (saved games)
+	fn HasPersistentMemory(self) -> bool {
+        return (self.flags6&0x02 == 0x02);
+    }
+
+    // Bit 2 of flags6: a 512 byte trainer sits between the header and the PRG ROM
+	fn HasTrainer(self) -> bool {
+        return (self.flags6&0x04 == 0x04);
+    }
+    // Bit 3 of flags6: the cartridge brings VRAM for four screens and the mirroring bit is ignored
+	fn IgnoreMirroringControl(self) -> bool {
+        return (self.flags6 & 0x08) == 0x08;
+    }
+    fn chrIsRAM(self) -> bool {
+        return self.chrROMSize == 0;
+    }
+	fn MapperNumber(self) -> byte {
+        return (self.flags6 >> 4) | (self.flags7 & 0xF0);
+    }
+    // flags8: PRG RAM size in 8KB units. 0 means 1 unit, for old ROMs that leave it empty
+	fn PRGRAM(self) -> byte {
+        if (self.flags8 == 0) {
+            return 1;
+        }
+        return self.flags8;
+    }
+	fn TvSystem(self) -> byte {
+        return self.flags9 & 0x01;
+    }
+}

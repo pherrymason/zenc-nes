@@ -1,0 +1,122 @@
+import "./header.zc";
+import "../types.zc";
+
+enum AnyMapper {
+    Nrom(Mapper000),
+}
+
+trait Mapper {
+    fn prgBanks(self) -> byte;
+    fn chrBanks(self) -> byte;
+
+    fn readPrgROM(self, address: Address) -> byte;
+    fn writePrgROM(self, address: Address, value: byte);
+    fn readChrROM(self, address: Address) -> byte;
+    fn writeChrROM(self, address: Address, value: byte);
+}
+
+fn createMapper(header: InesHeader, prgROM: [byte], chrROM: [byte]) -> AnyMapper {
+    match header.MapperNumber() {
+        0 => return AnyMapper::Nrom(Mapper000::create(header, prgROM, chrROM)),
+        _ => panic(f"Mapper {header.MapperNumber()} not supported"),
+    }
+}
+
+impl Mapper for AnyMapper {
+    fn prgBanks(self) -> byte {
+        // `match self`, without `*`: `ref m` points to the GamePak's mapper, not a copy
+        match self {
+            AnyMapper::Nrom(ref m) => return m.prgROMBanks;
+        }
+    }
+
+    fn chrBanks(self) -> byte {
+        // `match self`, without `*`: `ref m` points to the GamePak's mapper, not a copy
+        match self {
+            AnyMapper::Nrom(ref m) => return m.chrROMBanks;
+        }
+    }
+
+    fn readPrgROM(self, address: Address) -> byte {
+        match self {
+            AnyMapper::Nrom(ref m) => return m.readPrgROM(address);
+        }
+    }
+
+    fn writePrgROM(self, address: Address, value: byte) {
+        match self {
+            AnyMapper::Nrom(ref m) => m.writePrgROM(address, value)
+        }
+    }
+
+    fn readChrROM(self, address: Address) -> byte {
+        match self {
+            AnyMapper::Nrom(ref m) => return m.readChrROM(address);
+        }
+    }
+    
+    fn writeChrROM(self, address: Address, value: byte) {
+        match self {
+            AnyMapper::Nrom(ref m) => m.writeChrROM(address, value)
+        }
+    }
+}
+
+
+struct Mapper000 {
+    prgROMBanks: byte,
+    chrROMBanks: byte,
+    prgROM: [byte],
+    chrROM: [byte],
+    hasCHRRam: bool,
+}
+
+impl Mapper000 {
+    fn create(header: InesHeader, prgROM: [byte], chrROM: [byte]) -> Mapper000 {
+        let mapper = Mapper000{
+            prgROMBanks: header.ProgramSize(),
+            chrROMBanks: header.CHRSize(),
+            prgROM: prgROM,
+            chrROM: chrROM,
+            hasCHRRam: header.chrIsRAM(),
+        }
+
+        return mapper;
+    }
+}
+
+// NROM: no bank switching.
+// PRG of 16 KB: 0x8000-0xBFFF maps it and 0xC000-0xFFFF mirrors it (mask 0x3FFF).
+// PRG of 32 KB: 0x8000-0xFFFF maps it (mask 0x7FFF).
+impl Mapper for Mapper000 {
+    fn prgBanks(self) -> byte { return self.prgROMBanks; }
+    fn chrBanks(self) -> byte { return self.chrROMBanks; }
+
+    fn readPrgROM(self, address: Address) -> byte {
+        if (address < 0x8000) {
+            return 0;
+        }
+        let mask: Address = 0x7FFF;
+        if (self.prgROMBanks == 1) {
+            mask = 0x3FFF;
+        }
+        return self.prgROM[address & mask];
+    }
+
+    // NROM has no registers and PRG is ROM: writes are ignored.
+    fn writePrgROM(self, address: Address, value: byte) {
+        (void)address;
+        (void)value;
+    }
+
+    // The pattern tables are 0x0000-0x1FFF of the PPU: 8 KB.
+    fn readChrROM(self, address: Address) -> byte {
+        return self.chrROM[address & 0x1FFF];
+    }
+
+    fn writeChrROM(self, address: Address, value: byte) {
+        if (self.hasCHRRam) {
+            self.chrROM[address & 0x1FFF] = value;
+        }
+    }
+}

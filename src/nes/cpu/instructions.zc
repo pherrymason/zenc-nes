@@ -1,0 +1,481 @@
+import "./cpu6502.zc";
+
+impl Cpu6502 {
+
+    // LDA: M -> A. Flags: N Z
+    fn lda(self, info: OperationMethodArgument) -> bool {
+        self.registers.A = self.memory.read(info.operandAddress);
+        self.registers.updateNegativeAndZeroFlags(self.registers.A);
+
+        return true;
+    }
+
+    // LDX: M -> X. Flags: N Z
+    fn ldx(self, info: OperationMethodArgument) -> bool {
+        self.registers.X = self.memory.read(info.operandAddress);
+        self.registers.updateNegativeAndZeroFlags(self.registers.X);
+
+        return true;
+    }
+
+    // LDY: M -> Y. Flags: N Z
+    fn ldy(self, info: OperationMethodArgument) -> bool {
+        self.registers.Y = self.memory.read(info.operandAddress);
+        self.registers.updateNegativeAndZeroFlags(self.registers.Y);
+
+        return true;
+    }
+
+    // STA: A -> M. No flags
+    fn sta(self, info: OperationMethodArgument) -> bool {
+        self.memory.write(info.operandAddress, self.registers.A);
+
+        return false;
+    }
+
+    // STX: X -> M. No flags
+    fn stx(self, info: OperationMethodArgument) -> bool {
+        self.memory.write(info.operandAddress, self.registers.X);
+
+        return false;
+    }
+
+    // STY: Y -> M. No flags
+    fn sty(self, info: OperationMethodArgument) -> bool {
+        self.memory.write(info.operandAddress, self.registers.Y);
+
+        return false;
+    }
+
+    // CLC: 0 -> C
+    fn clc(self, _: OperationMethodArgument) -> bool {
+        self.registers.setCarryFlag(false);
+        return false;
+    }
+
+    // CLD: 0 -> D
+    fn cld(self, _: OperationMethodArgument) -> bool {
+        self.registers.setDecimalFlag(false);
+        return false;
+    }
+
+    // CLI: 0 -> I (enables interrupts)
+    fn cli(self, _: OperationMethodArgument) -> bool {
+        self.registers.setInterruptFlag(false);
+        return false;
+    }
+
+    // CLV: 0 -> V. There is no SEV: only ADC, SBC and BIT set V
+    fn clv(self, _: OperationMethodArgument) -> bool {
+        self.registers.setOverflowFlag(false);
+        return false;
+    }
+
+    // SEC: 1 -> C
+    fn sec(self, _: OperationMethodArgument) -> bool {
+        self.registers.setCarryFlag(true);
+        return false;
+    }
+
+    // SED: 1 -> D. The NES 2A03 has no decimal mode: the flag changes but ADC/SBC ignore it
+    fn sed(self, _: OperationMethodArgument) -> bool {
+        self.registers.setDecimalFlag(true);
+        return false;
+    }
+
+    // SEI: 1 -> I (disables interrupts)
+    fn sei(self, _: OperationMethodArgument) -> bool {
+        self.registers.setInterruptFlag(true);
+        return false;
+    }
+
+    // TAX: A -> X. Flags: N Z
+    fn tax(self, _: OperationMethodArgument) -> bool {
+        self.registers.X = self.registers.A;
+        self.registers.updateNegativeAndZeroFlags(self.registers.X);
+        return false;
+    }
+
+    // TAY: A -> Y. Flags: N Z
+    fn tay(self, _: OperationMethodArgument) -> bool {
+        self.registers.Y = self.registers.A;
+        self.registers.updateNegativeAndZeroFlags(self.registers.Y);
+        return false;
+    }
+
+    // TSX: Sp -> X. Flags: N Z
+    fn tsx(self, _: OperationMethodArgument) -> bool {
+        self.registers.X = self.registers.Sp;
+        self.registers.updateNegativeAndZeroFlags(self.registers.X);
+        return false;
+    }
+
+    // TXA: X -> A. Flags: N Z
+    fn txa(self, _: OperationMethodArgument) -> bool {
+        self.registers.A = self.registers.X;
+        self.registers.updateNegativeAndZeroFlags(self.registers.A);
+        return false;
+    }
+
+    // TXS: X -> Sp. No flags: Sp is not a data register
+    fn txs(self, _: OperationMethodArgument) -> bool {
+        self.registers.Sp = self.registers.X;
+        return false;
+    }
+
+    // TYA: Y -> A. Flags: N Z
+    fn tya(self, _: OperationMethodArgument) -> bool {
+        self.registers.A = self.registers.Y;
+        self.registers.updateNegativeAndZeroFlags(self.registers.A);
+        return false;
+    }
+
+    // INC: M + 1 -> M. Flags: N Z
+    fn inc(self, info: OperationMethodArgument) -> bool {
+        let value: byte = self.memory.read(info.operandAddress) + 1;
+        self.memory.write(info.operandAddress, value);
+        self.registers.updateNegativeAndZeroFlags(value);
+        return false;
+    }
+
+    // DEC: M - 1 -> M. Flags: N Z
+    fn dec(self, info: OperationMethodArgument) -> bool {
+        let value: byte = self.memory.read(info.operandAddress) - 1;
+        self.memory.write(info.operandAddress, value);
+        self.registers.updateNegativeAndZeroFlags(value);
+        return false;
+    }
+
+    // INX: X + 1 -> X. Flags: N Z
+    fn inx(self, _: OperationMethodArgument) -> bool {
+        self.registers.X += 1;
+        self.registers.updateNegativeAndZeroFlags(self.registers.X);
+        return false;
+    }
+
+    // INY: Y + 1 -> Y. Flags: N Z
+    fn iny(self, _: OperationMethodArgument) -> bool {
+        self.registers.Y += 1;
+        self.registers.updateNegativeAndZeroFlags(self.registers.Y);
+        return false;
+    }
+
+    // DEX: X - 1 -> X. Flags: N Z
+    fn dex(self, _: OperationMethodArgument) -> bool {
+        self.registers.X -= 1;
+        self.registers.updateNegativeAndZeroFlags(self.registers.X);
+        return false;
+    }
+
+    // DEY: Y - 1 -> Y. Flags: N Z
+    fn dey(self, _: OperationMethodArgument) -> bool {
+        self.registers.Y -= 1;
+        self.registers.updateNegativeAndZeroFlags(self.registers.Y);
+        return false;
+    }
+
+    // AND: A & M -> A. Flags: N Z
+    // Named and_ because `and` is a Zen C keyword
+    fn and_(self, info: OperationMethodArgument) -> bool {
+        self.registers.A &= self.memory.read(info.operandAddress);
+        self.registers.updateNegativeAndZeroFlags(self.registers.A);
+        return true;
+    }
+
+    // ORA: A | M -> A. Flags: N Z
+    fn ora(self, info: OperationMethodArgument) -> bool {
+        self.registers.A |= self.memory.read(info.operandAddress);
+        self.registers.updateNegativeAndZeroFlags(self.registers.A);
+        return true;
+    }
+
+    // EOR: A ^ M -> A. Flags: N Z
+    fn eor(self, info: OperationMethodArgument) -> bool {
+        self.registers.A ^= self.memory.read(info.operandAddress);
+        self.registers.updateNegativeAndZeroFlags(self.registers.A);
+        return true;
+    }
+
+    // BIT: A & M sets Z, but the result is not kept. N and V copy bits 7 and 6 of M
+    fn bit(self, info: OperationMethodArgument) -> bool {
+        let value: byte = self.memory.read(info.operandAddress);
+        self.registers.updateZeroFlag(self.registers.A & value);
+        self.registers.updateNegativeFlag(value);
+        self.registers.setOverflowFlag((value & 0x40) == 0x40);
+        return false;
+    }
+
+    // Stack
+
+    // PHA: push A. No flags
+    fn pha(self, _: OperationMethodArgument) -> bool {
+        self.pushStack(self.registers.A);
+        return false;
+    }
+
+    // PHP: push the status with B (bit 4) and bit 5 set. The status itself does not change
+    fn php(self, _: OperationMethodArgument) -> bool {
+        self.pushStack(self.registers.statusRegister() | 0x10);
+        return false;
+    }
+
+    // PLA: pull A. Flags: N Z
+    fn pla(self, _: OperationMethodArgument) -> bool {
+        self.registers.A = self.popStack();
+        self.registers.updateNegativeAndZeroFlags(self.registers.A);
+        return false;
+    }
+
+    // PLP: pull the status. B (bit 4) is discarded and bit 5 stays set
+    fn plp(self, _: OperationMethodArgument) -> bool {
+        self.registers.loadStatusRegisterIgnoring5and4(self.popStack());
+        return false;
+    }
+
+    // Comparisons
+
+    // value - operand without keeping the result: C when value >= operand,
+    // Z when they are equal, N from bit 7 of the difference
+    fn compare(self, value: byte, operand: byte) {
+        self.registers.setCarryFlag(value >= operand);
+        self.registers.updateNegativeAndZeroFlags((byte)(value - operand));
+    }
+
+    // CMP: A - M. Flags: N Z C
+    // Returns true: CMP abs,X, abs,Y and (ind),Y take a cycle more on a page
+    // cross (the Go version returned false)
+    fn cmp(self, info: OperationMethodArgument) -> bool {
+        self.compare(self.registers.A, self.memory.read(info.operandAddress));
+        return true;
+    }
+
+    // CPX: X - M. Flags: N Z C
+    fn cpx(self, info: OperationMethodArgument) -> bool {
+        self.compare(self.registers.X, self.memory.read(info.operandAddress));
+        return false;
+    }
+
+    // CPY: Y - M. Flags: N Z C
+    fn cpy(self, info: OperationMethodArgument) -> bool {
+        self.compare(self.registers.Y, self.memory.read(info.operandAddress));
+        return false;
+    }
+
+    // Shifts and rotations
+    // The accumulator form (ASL A, LSR A...) is in the table as Implicit:
+    // it works on A instead of memory.
+
+    fn readAccumulatorOrMemory(self, info: OperationMethodArgument) -> byte {
+        if info.addressMode == AddressMode::Implicit {
+            return self.registers.A;
+        }
+        return self.memory.read(info.operandAddress);
+    }
+
+    fn writeAccumulatorOrMemory(self, info: OperationMethodArgument, value: byte) {
+        if info.addressMode == AddressMode::Implicit {
+            self.registers.A = value;
+        } else {
+            self.memory.write(info.operandAddress, value);
+        }
+    }
+
+    // ASL: C <- [76543210] <- 0. Flags: N Z C
+    fn asl(self, info: OperationMethodArgument) -> bool {
+        let value: byte = self.readAccumulatorOrMemory(info);
+        let result: byte = (byte)(value << 1);
+        self.registers.setCarryFlag((value & 0x80) == 0x80);
+        self.writeAccumulatorOrMemory(info, result);
+        self.registers.updateNegativeAndZeroFlags(result);
+        return false;
+    }
+
+    // LSR: 0 -> [76543210] -> C. Flags: N (always 0) Z C
+    fn lsr(self, info: OperationMethodArgument) -> bool {
+        let value: byte = self.readAccumulatorOrMemory(info);
+        let result: byte = value >> 1;
+        self.registers.setCarryFlag((value & 0x01) == 0x01);
+        self.writeAccumulatorOrMemory(info, result);
+        self.registers.updateNegativeAndZeroFlags(result);
+        return false;
+    }
+
+    // ROL: C <- [76543210] <- C. Flags: N Z C
+    fn rol(self, info: OperationMethodArgument) -> bool {
+        let value: byte = self.readAccumulatorOrMemory(info);
+        let result: byte = (byte)(value << 1) | self.registers.carryFlag();
+        self.registers.setCarryFlag((value & 0x80) == 0x80);
+        self.writeAccumulatorOrMemory(info, result);
+        self.registers.updateNegativeAndZeroFlags(result);
+        return false;
+    }
+
+    // ROR: C -> [76543210] -> C. Flags: N Z C
+    fn ror(self, info: OperationMethodArgument) -> bool {
+        let value: byte = self.readAccumulatorOrMemory(info);
+        let result: byte = (value >> 1) | (byte)(self.registers.carryFlag() << 7);
+        self.registers.setCarryFlag((value & 0x01) == 0x01);
+        self.writeAccumulatorOrMemory(info, result);
+        self.registers.updateNegativeAndZeroFlags(result);
+        return false;
+    }
+
+    // Branches
+    // When taken, a branch takes 1 cycle more, and 2 if the target is in
+    // another page than the next instruction. Pc already points to the next
+    // instruction when the method runs.
+
+    fn branchIf(self, condition: bool, info: OperationMethodArgument) {
+        if !condition {
+            return;
+        }
+        self.opCyclesLeft += 1;
+        if memoryPageDiffer(self.registers.Pc, info.operandAddress) {
+            self.opCyclesLeft += 1;
+        }
+        self.registers.Pc = info.operandAddress;
+    }
+
+    // BCC: branch on C = 0
+    fn bcc(self, info: OperationMethodArgument) -> bool {
+        self.branchIf(self.registers.carryFlag() == 0, info);
+        return false;
+    }
+
+    // BCS: branch on C = 1
+    fn bcs(self, info: OperationMethodArgument) -> bool {
+        self.branchIf(self.registers.carryFlag() == 1, info);
+        return false;
+    }
+
+    // BEQ: branch on Z = 1
+    fn beq(self, info: OperationMethodArgument) -> bool {
+        self.branchIf(self.registers.zeroFlag() == 1, info);
+        return false;
+    }
+
+    // BNE: branch on Z = 0
+    fn bne(self, info: OperationMethodArgument) -> bool {
+        self.branchIf(self.registers.zeroFlag() == 0, info);
+        return false;
+    }
+
+    // BMI: branch on N = 1
+    fn bmi(self, info: OperationMethodArgument) -> bool {
+        self.branchIf(self.registers.negativeFlag() == 1, info);
+        return false;
+    }
+
+    // BPL: branch on N = 0
+    fn bpl(self, info: OperationMethodArgument) -> bool {
+        self.branchIf(self.registers.negativeFlag() == 0, info);
+        return false;
+    }
+
+    // BVC: branch on V = 0
+    fn bvc(self, info: OperationMethodArgument) -> bool {
+        self.branchIf(self.registers.overflowFlag() == 0, info);
+        return false;
+    }
+
+    // BVS: branch on V = 1
+    fn bvs(self, info: OperationMethodArgument) -> bool {
+        self.branchIf(self.registers.overflowFlag() == 1, info);
+        return false;
+    }
+
+    // Jumps, subroutines and interrupts
+
+    // JMP: operand address -> Pc (absolute, or indirect with the page bug)
+    fn jmp(self, info: OperationMethodArgument) -> bool {
+        self.registers.Pc = info.operandAddress;
+        return false;
+    }
+
+    // JSR: pushes the address of its own last byte (next instruction - 1),
+    // then jumps. RTS adds the 1 back
+    fn jsr(self, info: OperationMethodArgument) -> bool {
+        self.pushAddress(self.registers.Pc - 1);
+        self.registers.Pc = info.operandAddress;
+        return false;
+    }
+
+    // RTS: pulls the address pushed by JSR and continues after it
+    fn rts(self, _: OperationMethodArgument) -> bool {
+        self.registers.Pc = self.popAddress() + 1;
+        return false;
+    }
+
+    // Pushes the return address and the status, disables interrupts and jumps
+    // to the address stored at the vector
+    fn interrupt(self, returnAddress: Address, pushedStatus: byte, vector: Address) {
+        self.pushAddress(returnAddress);
+        self.pushStack(pushedStatus);
+        self.registers.setInterruptFlag(true);
+        self.registers.Pc = self.read16(vector);
+    }
+
+    // BRK: software interrupt through the IRQ vector (0xFFFE). Pushes
+    // Pc + 1 (BRK is followed by a padding byte) and the status with B set
+    fn brk(self, _: OperationMethodArgument) -> bool {
+        self.interrupt(self.registers.Pc + 1, self.registers.statusRegister() | 0x10, 0xFFFE);
+        return false;
+    }
+
+    // RTI: pulls the status (B discarded, bit 5 set) and then Pc. Unlike RTS, no + 1
+    fn rti(self, _: OperationMethodArgument) -> bool {
+        self.registers.loadStatusRegisterIgnoring5and4(self.popStack());
+        self.registers.Pc = self.popAddress();
+        return false;
+    }
+
+    // Non maskable interrupt (the PPU raises it on vblank): vector 0xFFFA,
+    // status pushed with B clear
+    fn nmi(self) {
+        self.interrupt(self.registers.Pc, self.registers.statusRegister() & 0xEF, 0xFFFA);
+    }
+
+    // Interrupt request: ignored while I is set. Vector 0xFFFE, status pushed with B clear
+    fn irq(self) {
+        if self.registers.interruptFlag() == 1 {
+            return;
+        }
+        self.interrupt(self.registers.Pc, self.registers.statusRegister() & 0xEF, 0xFFFE);
+    }
+
+    // NOP: does nothing
+    fn nop(self, _: OperationMethodArgument) -> bool {
+        return false;
+    }
+
+    // Arithmetic
+
+    // A + value + C -> A. Flags: N Z C V
+    // C is set when the sum does not fit in 8 bits. V is set when A and value
+    // have the same sign and the result has the other one (signed overflow).
+    // http://www.righto.com/2012/12/the-6502-overflow-flag-explained.html
+    fn addWithCarry(self, value: byte) {
+        let a: byte = self.registers.A;
+        let sum: u16 = (u16)a + (u16)value + (u16)self.registers.carryFlag();
+        let result: byte = (byte)sum;
+
+        self.registers.setCarryFlag(sum > 0xFF);
+        self.registers.setOverflowFlag(((a ^ result) & (value ^ result) & 0x80) != 0);
+        self.registers.A = result;
+        self.registers.updateNegativeAndZeroFlags(result);
+    }
+
+    // ADC: A + M + C -> A. Flags: N Z C V. The 2A03 has no decimal mode
+    fn adc(self, info: OperationMethodArgument) -> bool {
+        self.addWithCarry(self.memory.read(info.operandAddress));
+        return true;
+    }
+
+    // SBC: A - M - (1 - C) -> A. Flags: N Z C V
+    // On the 6502 it is ADC of the operand with its bits inverted:
+    // A - M - (1 - C) == A + (255 - M) + C - 256, and the - 256 is the carry out
+    fn sbc(self, info: OperationMethodArgument) -> bool {
+        self.addWithCarry((byte)(self.memory.read(info.operandAddress) ^ 0xFF));
+        return true;
+    }
+}

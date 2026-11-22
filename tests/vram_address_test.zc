@@ -1,0 +1,122 @@
+import "../src/nes/ppu/vram_address.zc";
+
+// From Go: Test_loopyRegister_push_first_byte
+test "the high byte of PPUADDR fills bits 8-13" {
+    let t = VramAddress{};
+    t.setHighByte(0xFF);
+    assert(t.value == 0x3F00, "only 6 bits of the high byte are kept");
+}
+
+// From Go: Test_loopyRegister_push_second_byte
+test "the low byte of PPUADDR fills bits 0-7" {
+    let t = VramAddress{ value: 0x3F00 };
+    t.setLowByte(0xFF);
+    assert(t.value == 0x3FFF, "high byte kept, low byte written");
+}
+
+// Not in Go: bit 14 is the top bit of fine Y, and PPUADDR clears it
+test "the high byte of PPUADDR clears bit 14" {
+    let t = VramAddress{ value: 0x7FFF };
+    t.setHighByte(0x3F);
+    assert(t.value == 0x3FFF, "bit 14 cleared");
+}
+
+// From Go: Test_loopyRegister_increment
+test "incrementing by 1 past coarse X 31 carries into coarse Y" {
+    let v = VramAddress{ value: 0x001F };
+    v.increment(1);
+    assert(v.value == 0x0020, "next row of tiles");
+}
+
+// Not in Go
+test "incrementing by 32 goes down a row, and the 15 bits wrap" {
+    let v = VramAddress{ value: 0x2000 };
+    v.increment(32);
+    assert(v.value == 0x2020, "one row down");
+
+    let last = VramAddress{ value: 0x7FFF };
+    last.increment(1);
+    assert(last.value == 0x0000, "0x7FFF wraps to 0");
+}
+
+// Not in Go: each setter writes its field and leaves the rest
+test "the field setters write only their own bits" {
+    let t = VramAddress{};
+    t.setCoarseX(0xFF);
+    assert(t.value == 0x001F, "coarse X, 5 bits");
+    t.setCoarseY(0xFF);
+    assert(t.value == 0x03FF, "coarse Y, 5 bits");
+    t.setNameTable(0xFF);
+    assert(t.value == 0x0FFF, "nametable, 2 bits");
+    t.setFineY(0xFF);
+    assert(t.value == 0x7FFF, "fine Y, 3 bits");
+
+    t.setCoarseX(0);
+    assert(t.value == 0x7FE0, "clearing coarse X leaves the rest");
+}
+
+// --- Rendering: how the PPU walks v (nesdev "PPU scrolling") ---
+
+test "tile and attribute addresses come from coarse X, coarse Y and the nametable" {
+    let v = VramAddress{};
+    v.setCoarseX(5);
+    v.setCoarseY(9);
+    v.setNameTable(1);
+    v.setFineY(3);   // ignored by both
+
+    assert(v.tileAddress() == 0x2400 + 9 * 32 + 5, "nametable 1, row 9, column 5");
+    assert(v.attributeAddress() == 0x27C0 + (9 / 4) * 8 + 5 / 4, "attributes of nametable 1, block (1, 2)");
+}
+
+// From Go: incrementX
+test "past column 31, coarse X wraps and switches to the nametable to the side" {
+    let v = VramAddress{ value: 0x001E };
+    v.incrementCoarseX();
+    assert(v.value == 0x001F, "column 31");
+    v.incrementCoarseX();
+    assert(v.value == 0x0400, "column 0 of nametable 1");
+    v.value = 0x041F;
+    v.incrementCoarseX();
+    assert(v.value == 0x0000, "and back to nametable 0");
+}
+
+// From Go: incrementY
+test "fine Y counts the 8 rows of a tile, then coarse Y moves" {
+    let v = VramAddress{};
+    v.incrementY();
+    assert(v.fineY() == 1 && v.coarseY() == 0, "next pixel row");
+
+    v.setFineY(7);
+    v.incrementY();
+    assert(v.fineY() == 0 && v.coarseY() == 1, "next row of tiles");
+}
+
+test "past row 29, coarse Y wraps and switches to the nametable below" {
+    let v = VramAddress{};
+    v.setCoarseY(29);
+    v.setFineY(7);
+    v.incrementY();
+    assert(v.coarseY() == 0 && v.value == 0x0800, "row 0 of nametable 2");
+}
+
+// Rows 30 and 31 are the attribute table; a scroll can still point there
+test "from row 31, coarse Y wraps without switching nametable" {
+    let v = VramAddress{};
+    v.setCoarseY(31);
+    v.setFineY(7);
+    v.incrementY();
+    assert(v.value == 0x0000, "row 0 of the same nametable");
+}
+
+// From Go: transferX and transferY
+test "copyHorizontal and copyVertical take their bits from t and keep the rest" {
+    let t = VramAddress{ value: 0x7FFF };
+
+    let v = VramAddress{};
+    v.copyHorizontal(t);
+    assert(v.value == 0x041F, "coarse X and the horizontal nametable bit");
+
+    let w = VramAddress{};
+    w.copyVertical(t);
+    assert(w.value == 0x7BE0, "fine Y, coarse Y and the vertical nametable bit");
+}

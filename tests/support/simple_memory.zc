@@ -1,0 +1,15 @@
+import "../../src/nes/memory.zc";
+
+struct SimpleMemory {
+    ram: byte[0x10000];
+}
+
+impl Memory for SimpleMemory {
+    fn read(self, address: Address) -> byte {
+        return self.ram[address];
+    }
+
+    fn write(self, address: Address, value: byte) {
+        self.ram[address] = value;
+    }
+}

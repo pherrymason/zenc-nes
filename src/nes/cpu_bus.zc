@@ -1,0 +1,90 @@
+import "./memory.zc";
+import "../gamepak/gamepak.zc";
+import "./ppu/render.zc";
+import "./controller.zc";
+
+// Internal RAM of the NES: 2 KB, mirrored 4 times over 0x0000-0x1FFF
+def RAM_SIZE = 0x0800;
+def RAM_MIRRORS_END: Address = 0x1FFF;   // last address that reaches the RAM
+def PPU_REGISTERS_END: Address = 0x3FFF;  // 0x2000-0x2007, mirrored every 8 bytes
+def OAM_DMA: Address = 0x4014;           // writing XX copies 0xXX00-0xXXFF into the PPU's OAM
+def CONTROLLER_1: Address = 0x4016;      // read: controller 1; write: strobe of both controllers
+def CONTROLLER_2: Address = 0x4017;      // read: controller 2 (writing it goes to the APU)
+def CARTRIDGE_START: Address = 0x4020;   // from here up, the cartridge decides
+
+// What the CPU sees when it reads or writes an address: RAM, the PPU and
+// APU registers, or the cartridge, depending on the address
+struct CpuBus {
+    ram: byte[RAM_SIZE];
+    gamePak: GamePak*; // owned by whoever loaded the ROM
+    ppu: Ppu;          // lives in the bus: the bus is on the heap, so it never moves
+    dmaRequested: bool; // an OAM DMA ran: the CPU has to stop for its cycles; read once
+    controllers: Controller[2];
+}
+
+impl CpuBus {
+    fn create(gamePak: GamePak*) -> CpuBus {
+        return CpuBus{
+            gamePak: gamePak,
+            ppu: Ppu::create(gamePak),
+        };
+    }
+
+    // OAM DMA: 256 writes to OAMDATA, so it starts at OAMADDR and wraps.
+    // The CPU is halted while it runs, so nothing can change the page: copying
+    // it at once gives the same OAM. Nes stops the CPU for the cycles it takes.
+    fn copyPageToOam(self, page: byte) {
+        let start: Address = (Address)page << 8;
+        for i in 0..256 {
+            self.ppu.writeRegister(PPU_OAM_DATA, self.read(start + (Address)i));
+        }
+        self.dmaRequested = true;
+    }
+
+    // Whether an OAM DMA ran since the last call, and clears it
+    fn takeDmaRequest(self) -> bool {
+        let requested = self.dmaRequested;
+        self.dmaRequested = false;
+        return requested;
+    }
+}
+
+impl Memory for CpuBus {
+    fn read(self, address: Address) -> byte {
+        if (address <= RAM_MIRRORS_END) {
+            return self.ram[address & 0x07FF];
+        }
+        
+        if (address <= PPU_REGISTERS_END) {
+            return self.ppu.readRegister(address & 0x2007);
+        }
+
+        if (address == CONTROLLER_1 || address == CONTROLLER_2) {
+            return self.controllers[address - CONTROLLER_1].read();
+        }
+
+        if (address < CARTRIDGE_START) {
+            return 0; // APU registers: not emulated yet
+        }
+
+        return self.gamePak.mapper.readPrgROM(address);
+    }
+
+    fn write(self, address: Address, value: byte) {
+        if (address <= RAM_MIRRORS_END) {
+            self.ram[address & 0x07FF] = value;
+        } else if (address <= PPU_REGISTERS_END) {
+            self.ppu.writeRegister(address & 0x2007, value);
+        } else if (address == OAM_DMA) {
+            self.copyPageToOam(value);
+        } else if (address == CONTROLLER_1) {
+            // One strobe line goes to both controller ports
+            self.controllers[0].write(value);
+            self.controllers[1].write(value);
+        } else if (address >= CARTRIDGE_START) {
+            self.gamePak.mapper.writePrgROM(address, value);
+        }
+
+        // APU registers: not emulated yet
+    }
+}

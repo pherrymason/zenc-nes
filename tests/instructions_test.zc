@@ -1,0 +1,1024 @@
+import "./support/simple_memory.zc";
+import "../src/nes/cpu.zc";
+
+// The instruction methods get the operand address already evaluated:
+// the address mode does not matter to them.
+fn operandAt(address: Address) -> OperationMethodArgument {
+    return OperationMethodArgument{ addressMode: AddressMode::Immediate, operandAddress: address };
+}
+
+// LDA, LDX, LDY
+
+test "LDA loads A and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.memory.write(0x0000, 0x20);
+    assert(cpu.lda(operandAt(0x0000)), "may take an extra cycle");
+    assert(cpu.registers.A == 0x20, "positive: A");
+    assert(cpu.registers.zeroFlag() == 0, "positive: Z");
+    assert(cpu.registers.negativeFlag() == 0, "positive: N");
+
+    cpu.memory.write(0x0000, 0x00);
+    cpu.lda(operandAt(0x0000));
+    assert(cpu.registers.A == 0x00, "zero: A");
+    assert(cpu.registers.zeroFlag() == 1, "zero: Z");
+    assert(cpu.registers.negativeFlag() == 0, "zero: N");
+
+    cpu.memory.write(0x0000, 0x80);
+    cpu.lda(operandAt(0x0000));
+    assert(cpu.registers.A == 0x80, "negative: A");
+    assert(cpu.registers.zeroFlag() == 0, "negative: Z");
+    assert(cpu.registers.negativeFlag() == 1, "negative: N");
+}
+
+test "LDX loads X and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.memory.write(0x0000, 0x20);
+    assert(cpu.ldx(operandAt(0x0000)), "may take an extra cycle");
+    assert(cpu.registers.X == 0x20, "positive: X");
+    assert(cpu.registers.zeroFlag() == 0, "positive: Z");
+    assert(cpu.registers.negativeFlag() == 0, "positive: N");
+
+    cpu.memory.write(0x0000, 0x00);
+    cpu.ldx(operandAt(0x0000));
+    assert(cpu.registers.X == 0x00, "zero: X");
+    assert(cpu.registers.zeroFlag() == 1, "zero: Z");
+    assert(cpu.registers.negativeFlag() == 0, "zero: N");
+
+    cpu.memory.write(0x0000, 0x80);
+    cpu.ldx(operandAt(0x0000));
+    assert(cpu.registers.X == 0x80, "negative: X");
+    assert(cpu.registers.zeroFlag() == 0, "negative: Z");
+    assert(cpu.registers.negativeFlag() == 1, "negative: N");
+}
+
+test "LDY loads Y and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.memory.write(0x0000, 0x20);
+    assert(cpu.ldy(operandAt(0x0000)), "may take an extra cycle");
+    assert(cpu.registers.Y == 0x20, "positive: Y");
+    assert(cpu.registers.zeroFlag() == 0, "positive: Z");
+    assert(cpu.registers.negativeFlag() == 0, "positive: N");
+
+    cpu.memory.write(0x0000, 0x00);
+    cpu.ldy(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x00, "zero: Y");
+    assert(cpu.registers.zeroFlag() == 1, "zero: Z");
+    assert(cpu.registers.negativeFlag() == 0, "zero: N");
+
+    cpu.memory.write(0x0000, 0x80);
+    cpu.ldy(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x80, "negative: Y");
+    assert(cpu.registers.zeroFlag() == 0, "negative: Z");
+    assert(cpu.registers.negativeFlag() == 1, "negative: N");
+}
+
+// STA, STX, STY
+
+test "STA writes A to memory and changes no flag" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.A = 0xFF;
+    let status = cpu.registers.Status;
+
+    assert(!cpu.sta(operandAt(0x0522)), "never takes an extra cycle");
+    assert(cpu.memory.read(0x0522) == 0xFF, "value");
+    assert(cpu.registers.Status == status, "flags");
+}
+
+test "STX writes X to memory and changes no flag" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.X = 0xFF;
+    let status = cpu.registers.Status;
+
+    assert(!cpu.stx(operandAt(0x0522)), "never takes an extra cycle");
+    assert(cpu.memory.read(0x0522) == 0xFF, "value");
+    assert(cpu.registers.Status == status, "flags");
+}
+
+test "STY writes Y to memory and changes no flag" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Y = 0xFF;
+    let status = cpu.registers.Status;
+
+    assert(!cpu.sty(operandAt(0x0522)), "never takes an extra cycle");
+    assert(cpu.memory.read(0x0522) == 0xFF, "value");
+    assert(cpu.registers.Status == status, "flags");
+}
+
+// Instruction table
+
+test "the table maps load and store opcodes" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    let lda = cpu.instructions[0xA9];
+    assert(lda.method == Cpu6502::lda, "0xA9 runs lda");
+    assert(lda.addressMode == AddressMode::Immediate, "0xA9 is immediate");
+    assert(lda.cycles == 2 && lda.size == 2, "0xA9 cycles and size");
+
+    let sta = cpu.instructions[0x8D];
+    assert(sta.method == Cpu6502::sta, "0x8D runs sta");
+    assert(sta.addressMode == AddressMode::Absolute, "0x8D is absolute");
+    assert(sta.cycles == 4 && sta.size == 3, "0x8D cycles and size");
+
+    assert(cpu.instructions[0x02].method == NULL, "0x02 is not an official opcode");
+}
+
+// N and Z after an instruction, as 0 or 1
+fn negativeAndZeroAre(cpu: Cpu6502*, negative: byte, zero: byte) -> bool {
+    return cpu.registers.negativeFlag() == negative && cpu.registers.zeroFlag() == zero;
+}
+
+// CLC, CLD, CLI, CLV, SEC, SED, SEI
+// The clears start with every flag set and the sets with every flag clear,
+// so each test also checks that the other flags are not touched.
+
+test "CLC clears only C" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0xFF;
+
+    assert(!cpu.clc(operandAt(0x0000)), "no extra cycle");
+    assert(cpu.registers.Status == 0xFE, "C cleared, others kept");
+}
+
+test "CLD clears only D" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0xFF;
+
+    cpu.cld(operandAt(0x0000));
+    assert(cpu.registers.Status == 0xF7, "D cleared, others kept");
+}
+
+test "CLI clears only I" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0xFF;
+
+    cpu.cli(operandAt(0x0000));
+    assert(cpu.registers.Status == 0xFB, "I cleared, others kept");
+}
+
+test "CLV clears only V" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0xFF;
+
+    cpu.clv(operandAt(0x0000));
+    assert(cpu.registers.Status == 0xBF, "V cleared, others kept");
+}
+
+test "SEC sets only C" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0x00;
+
+    assert(!cpu.sec(operandAt(0x0000)), "no extra cycle");
+    assert(cpu.registers.Status == 0x01, "C set, others kept");
+}
+
+test "SED sets only D" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0x00;
+
+    cpu.sed(operandAt(0x0000));
+    assert(cpu.registers.Status == 0x08, "D set, others kept");
+}
+
+test "SEI sets only I" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0x00;
+
+    cpu.sei(operandAt(0x0000));
+    assert(cpu.registers.Status == 0x04, "I set, others kept");
+}
+
+// TAX, TAY, TSX, TXA, TXS, TYA
+// Each transfer runs with zero, negative and positive values on the same CPU,
+// so it also checks that N and Z are cleared again.
+
+test "TAX copies A to X and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.A = 0x00;
+    assert(!cpu.tax(operandAt(0x0000)), "no extra cycle");
+    assert(cpu.registers.X == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.registers.A = 0x80;
+    cpu.tax(operandAt(0x0000));
+    assert(cpu.registers.X == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.A = 0x20;
+    cpu.tax(operandAt(0x0000));
+    assert(cpu.registers.X == 0x20 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+}
+
+test "TAY copies A to Y and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.A = 0x00;
+    cpu.tay(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.registers.A = 0x80;
+    cpu.tay(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.A = 0x20;
+    cpu.tay(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x20 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+}
+
+test "TSX copies Sp to X and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.Sp = 0x00;
+    cpu.tsx(operandAt(0x0000));
+    assert(cpu.registers.X == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.registers.Sp = 0x80;
+    cpu.tsx(operandAt(0x0000));
+    assert(cpu.registers.X == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.Sp = 0x20;
+    cpu.tsx(operandAt(0x0000));
+    assert(cpu.registers.X == 0x20 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+}
+
+test "TXA copies X to A and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.X = 0x00;
+    cpu.txa(operandAt(0x0000));
+    assert(cpu.registers.A == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.registers.X = 0x80;
+    cpu.txa(operandAt(0x0000));
+    assert(cpu.registers.A == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.X = 0x20;
+    cpu.txa(operandAt(0x0000));
+    assert(cpu.registers.A == 0x20 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+}
+
+test "TXS copies X to Sp and changes no flag" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    let status = cpu.registers.Status;
+
+    cpu.registers.X = 0x00;     // would set Z if TXS updated the flags
+    cpu.txs(operandAt(0x0000));
+    assert(cpu.registers.Sp == 0x00, "zero: Sp");
+    assert(cpu.registers.Status == status, "zero: flags");
+
+    cpu.registers.X = 0xFF;     // would set N
+    cpu.txs(operandAt(0x0000));
+    assert(cpu.registers.Sp == 0xFF, "negative: Sp");
+    assert(cpu.registers.Status == status, "negative: flags");
+}
+
+test "TYA copies Y to A and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.Y = 0x00;
+    cpu.tya(operandAt(0x0000));
+    assert(cpu.registers.A == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.registers.Y = 0x80;
+    cpu.tya(operandAt(0x0000));
+    assert(cpu.registers.A == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.Y = 0x20;
+    cpu.tya(operandAt(0x0000));
+    assert(cpu.registers.A == 0x20 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+}
+
+// INC, DEC, INX, INY, DEX, DEY
+// Each one runs over a positive result, the step into negative and the wrap
+// around 0x00/0xFF, on the same CPU so N and Z are also seen going back to 0.
+
+test "INC adds one to memory and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.memory.write(0x0010, 0x00);
+    assert(!cpu.inc(operandAt(0x0010)), "no extra cycle");
+    assert(cpu.memory.read(0x0010) == 0x01 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.memory.write(0x0010, 0x7F);
+    cpu.inc(operandAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.memory.write(0x0010, 0xFF);
+    cpu.inc(operandAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "wraps to zero");
+}
+
+test "DEC subtracts one from memory and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.memory.write(0x0010, 0x02);
+
+    assert(!cpu.dec(operandAt(0x0010)), "no extra cycle");
+    assert(cpu.memory.read(0x0010) == 0x01 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.dec(operandAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.dec(operandAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0xFF && negativeAndZeroAre(&cpu, 1, 0), "wraps to 0xFF");
+}
+
+test "INX adds one to X and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.X = 0x00;
+    assert(!cpu.inx(operandAt(0x0000)), "no extra cycle");
+    assert(cpu.registers.X == 0x01 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.registers.X = 0x7F;
+    cpu.inx(operandAt(0x0000));
+    assert(cpu.registers.X == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.X = 0xFF;
+    cpu.inx(operandAt(0x0000));
+    assert(cpu.registers.X == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "wraps to zero");
+}
+
+test "INY adds one to Y and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.Y = 0x00;
+    cpu.iny(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x01 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.registers.Y = 0x7F;
+    cpu.iny(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.Y = 0xFF;
+    cpu.iny(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "wraps to zero");
+}
+
+test "DEX subtracts one from X, sets N and Z and leaves Y alone" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.X = 0x02;
+    cpu.registers.Y = 0x02;
+
+    assert(!cpu.dex(operandAt(0x0000)), "no extra cycle");
+    assert(cpu.registers.X == 0x01 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.dex(operandAt(0x0000));
+    assert(cpu.registers.X == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.dex(operandAt(0x0000));
+    assert(cpu.registers.X == 0xFF && negativeAndZeroAre(&cpu, 1, 0), "wraps to 0xFF");
+    assert(cpu.registers.Y == 0x02, "Y untouched");
+}
+
+test "DEY subtracts one from Y, sets N and Z and leaves X alone" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.X = 0x02;
+    cpu.registers.Y = 0x02;
+
+    cpu.dey(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x01 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.dey(operandAt(0x0000));
+    assert(cpu.registers.Y == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.dey(operandAt(0x0000));
+    assert(cpu.registers.Y == 0xFF && negativeAndZeroAre(&cpu, 1, 0), "wraps to 0xFF");
+    assert(cpu.registers.X == 0x02, "X untouched");
+}
+
+// AND, ORA, EOR, BIT
+// AND, ORA and EOR use the same first pair of values, A = 0b01010011 and
+// M = 0b00110101, which gives a different result for each operation.
+
+test "AND keeps in A the bits set in both A and M" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.A = 0b01010011;
+    cpu.memory.write(0x0010, 0b00110101);
+    assert(cpu.and_(operandAt(0x0010)), "may take an extra cycle");
+    assert(cpu.registers.A == 0b00010001 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.registers.A = 0b10000000;
+    cpu.memory.write(0x0010, 0b10000000);
+    cpu.and_(operandAt(0x0010));
+    assert(cpu.registers.A == 0b10000000 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.A = 0b01000000;
+    cpu.memory.write(0x0010, 0b10000000);
+    cpu.and_(operandAt(0x0010));
+    assert(cpu.registers.A == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+}
+
+test "ORA keeps in A the bits set in A or M" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.A = 0b01010011;
+    cpu.memory.write(0x0010, 0b00110101);
+    assert(cpu.ora(operandAt(0x0010)), "may take an extra cycle");
+    assert(cpu.registers.A == 0b01110111 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.registers.A = 0x00;
+    cpu.memory.write(0x0010, 0x80);
+    cpu.ora(operandAt(0x0010));
+    assert(cpu.registers.A == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.A = 0x00;
+    cpu.memory.write(0x0010, 0x00);
+    cpu.ora(operandAt(0x0010));
+    assert(cpu.registers.A == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+}
+
+test "EOR keeps in A the bits set in only one of A and M" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.A = 0b01010011;
+    cpu.memory.write(0x0010, 0b00110101);
+    assert(cpu.eor(operandAt(0x0010)), "may take an extra cycle");
+    assert(cpu.registers.A == 0b01100110 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.registers.A = 0x7F;
+    cpu.memory.write(0x0010, 0xFF);
+    cpu.eor(operandAt(0x0010));
+    assert(cpu.registers.A == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.registers.A = 0x5A;
+    cpu.memory.write(0x0010, 0x5A);
+    cpu.eor(operandAt(0x0010));
+    assert(cpu.registers.A == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "a value with itself is zero");
+}
+
+// In Go every BIT case had A == M, so it could not tell where each flag came from.
+test "BIT sets Z from A & M and copies bits 7 and 6 of M to N and V" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    // No common bits, but M has bits 7 and 6 set
+    cpu.registers.A = 0x0F;
+    cpu.memory.write(0x0010, 0xC0);
+    assert(!cpu.bit(operandAt(0x0010)), "no extra cycle");
+    assert(cpu.registers.A == 0x0F, "A is not changed");
+    assert(cpu.registers.zeroFlag() == 1, "Z: nothing in common");
+    assert(cpu.registers.negativeFlag() == 1, "N: bit 7 of M");
+    assert(cpu.registers.overflowFlag() == 1, "V: bit 6 of M");
+
+    // A has bits 7 and 6 set, M does not: N and V follow M, not A
+    cpu.registers.A = 0xC1;
+    cpu.memory.write(0x0010, 0x01);
+    cpu.bit(operandAt(0x0010));
+    assert(cpu.registers.zeroFlag() == 0, "Z: bit 0 in common");
+    assert(cpu.registers.negativeFlag() == 0, "N: bit 7 of M is clear");
+    assert(cpu.registers.overflowFlag() == 0, "V: bit 6 of M is clear");
+
+    // Only bit 6 of M
+    cpu.registers.A = 0x40;
+    cpu.memory.write(0x0010, 0x40);
+    cpu.bit(operandAt(0x0010));
+    assert(cpu.registers.zeroFlag() == 0, "Z: bit 6 in common");
+    assert(cpu.registers.negativeFlag() == 0, "N");
+    assert(cpu.registers.overflowFlag() == 1, "V");
+}
+
+// The accumulator form of the shifts is the Implicit address mode
+fn accumulator() -> OperationMethodArgument {
+    return OperationMethodArgument{ addressMode: AddressMode::Implicit, operandAddress: 0x0000 };
+}
+
+fn memoryAt(address: Address) -> OperationMethodArgument {
+    return OperationMethodArgument{ addressMode: AddressMode::ZeroPage, operandAddress: address };
+}
+
+// PHA, PHP, PLA, PLP
+
+test "PHA pushes A and changes no flag" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.A = 0x30;
+    let status = cpu.registers.Status;
+
+    assert(!cpu.pha(operandAt(0x0000)), "no extra cycle");
+    assert(cpu.memory.read(0x01FF) == 0x30, "pushed at 0x01FF");
+    assert(cpu.registers.Sp == 0xFE, "Sp");
+    assert(cpu.registers.Status == status, "flags");
+}
+
+test "PHP pushes the status with B and bit 5 set, without changing it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0b11001111;
+
+    cpu.php(operandAt(0x0000));
+    assert(cpu.popStack() == 0xFF, "pushed with bits 5 and 4 set");
+    assert(cpu.registers.Status == 0b11001111, "status unchanged");
+}
+
+test "PLA pulls A and sets N and Z from it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.pushStack(0x00);
+    cpu.pla(operandAt(0x0000));
+    assert(cpu.registers.A == 0x00 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.pushStack(0x80);
+    cpu.pla(operandAt(0x0000));
+    assert(cpu.registers.A == 0x80 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+
+    cpu.pushStack(0x20);
+    cpu.pla(operandAt(0x0000));
+    assert(cpu.registers.A == 0x20 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+    assert(cpu.registers.Sp == 0xFF, "Sp back where it started");
+}
+
+test "PLP pulls the status, discarding B and setting bit 5" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.pushStack(0xFF);
+    cpu.plp(operandAt(0x0000));
+    assert(cpu.registers.Status == 0xEF, "B discarded");
+
+    cpu.pushStack(0x00);
+    cpu.plp(operandAt(0x0000));
+    assert(cpu.registers.Status == 0x20, "bit 5 set");
+    assert(cpu.registers.Sp == 0xFF, "Sp back where it started");
+}
+
+test "PHP then PLP keeps every flag" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0b11001011;
+
+    cpu.php(operandAt(0x0000));
+    cpu.registers.Status = 0x20;
+    cpu.plp(operandAt(0x0000));
+    assert(cpu.registers.Status == 0b11101011, "same flags, bit 5 set");
+}
+
+// CMP, CPX, CPY
+
+test "CMP compares A with M" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.A = 0x10;
+
+    cpu.memory.write(0x0010, 0x09);
+    assert(cpu.cmp(operandAt(0x0010)), "may take an extra cycle");
+    assert(cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 0), "A > M");
+
+    cpu.memory.write(0x0010, 0x15);
+    cpu.cmp(operandAt(0x0010));
+    assert(cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 1, 0), "A < M");
+
+    cpu.memory.write(0x0010, 0x10);
+    cpu.cmp(operandAt(0x0010));
+    assert(cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 1), "A = M");
+    assert(cpu.registers.A == 0x10, "A is not changed");
+}
+
+test "CMP takes N from the difference, not from which one is bigger" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.A = 0x01;
+    cpu.memory.write(0x0010, 0xFF);
+
+    cpu.cmp(operandAt(0x0010));
+    // 0x01 < 0xFF, but 0x01 - 0xFF = 0x02, which is positive
+    assert(cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 0, 0), "flags");
+}
+
+test "CPX compares X with M" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.X = 0x10;
+
+    cpu.memory.write(0x0010, 0x09);
+    assert(!cpu.cpx(operandAt(0x0010)), "no extra cycle");
+    assert(cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 0), "X > M");
+
+    cpu.memory.write(0x0010, 0x15);
+    cpu.cpx(operandAt(0x0010));
+    assert(cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 1, 0), "X < M");
+
+    cpu.memory.write(0x0010, 0x10);
+    cpu.cpx(operandAt(0x0010));
+    assert(cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 1), "X = M");
+}
+
+test "CPY compares Y with M" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Y = 0x10;
+
+    cpu.memory.write(0x0010, 0x09);
+    assert(!cpu.cpy(operandAt(0x0010)), "no extra cycle");
+    assert(cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 0), "Y > M");
+
+    cpu.memory.write(0x0010, 0x15);
+    cpu.cpy(operandAt(0x0010));
+    assert(cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 1, 0), "Y < M");
+
+    cpu.memory.write(0x0010, 0x10);
+    cpu.cpy(operandAt(0x0010));
+    assert(cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 1), "Y = M");
+}
+
+// ASL, LSR, ROL, ROR
+
+test "ASL on A shifts left, bit 7 goes to C" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.memory.write(0x0000, 0x55);   // must not be touched
+
+    cpu.registers.A = 0b00000001;
+    assert(!cpu.asl(accumulator()), "no extra cycle");
+    assert(cpu.registers.A == 0b00000010 && cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 0, 0), "positive");
+
+    cpu.registers.A = 0b10000001;
+    cpu.asl(accumulator());
+    assert(cpu.registers.A == 0b00000010 && cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 0), "positive with carry");
+
+    cpu.registers.A = 0b10000000;
+    cpu.asl(accumulator());
+    assert(cpu.registers.A == 0x00 && cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 1), "zero with carry");
+
+    cpu.registers.A = 0b01000000;
+    cpu.asl(accumulator());
+    assert(cpu.registers.A == 0x80 && cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 1, 0), "negative");
+    assert(cpu.memory.read(0x0000) == 0x55, "memory untouched");
+}
+
+test "ASL on memory shifts left, bit 7 goes to C" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.A = 0x55;   // must not be touched
+
+    cpu.memory.write(0x0010, 0b11000000);
+    cpu.asl(memoryAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x80 && cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 1, 0), "negative with carry");
+
+    cpu.memory.write(0x0010, 0b10000000);
+    cpu.asl(memoryAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x00 && cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 1), "zero with carry");
+    assert(cpu.registers.A == 0x55, "A untouched");
+}
+
+test "LSR shifts right, bit 0 goes to C and N is always clear" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Status = 0xFF;
+
+    cpu.registers.A = 0b00000010;
+    assert(!cpu.lsr(accumulator()), "no extra cycle");
+    assert(cpu.registers.A == 0b00000001 && cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 0, 0), "A");
+
+    cpu.registers.A = 0b00000011;
+    cpu.lsr(accumulator());
+    assert(cpu.registers.A == 0b00000001 && cpu.registers.carryFlag() == 1, "A with carry");
+
+    cpu.memory.write(0x0010, 0b00000001);
+    cpu.lsr(memoryAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x00 && cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 1), "memory: zero with carry");
+
+    cpu.memory.write(0x0010, 0xFF);
+    cpu.lsr(memoryAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x7F && negativeAndZeroAre(&cpu, 0, 0), "memory: bit 7 always 0");
+}
+
+test "ROL shifts left, C goes into bit 0 and bit 7 into C" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.A = 0x00;
+    cpu.registers.setCarryFlag(false);
+    assert(!cpu.rol(accumulator()), "no extra cycle");
+    assert(cpu.registers.A == 0x00 && cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.registers.A = 0x00;
+    cpu.registers.setCarryFlag(true);
+    cpu.rol(accumulator());
+    assert(cpu.registers.A == 0x01 && cpu.registers.carryFlag() == 0, "carry into bit 0");
+
+    cpu.registers.A = 0b10000000;
+    cpu.registers.setCarryFlag(false);
+    cpu.rol(accumulator());
+    assert(cpu.registers.A == 0x00 && cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 1), "bit 7 into carry");
+
+    cpu.memory.write(0x0010, 0b01000000);
+    cpu.registers.setCarryFlag(true);
+    cpu.rol(memoryAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x81 && cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 1, 0), "memory");
+}
+
+test "ROR shifts right, C goes into bit 7 and bit 0 into C" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.registers.A = 0x00;
+    cpu.registers.setCarryFlag(false);
+    assert(!cpu.ror(accumulator()), "no extra cycle");
+    assert(cpu.registers.A == 0x00 && cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 0, 1), "zero");
+
+    cpu.registers.A = 0x00;
+    cpu.registers.setCarryFlag(true);
+    cpu.ror(accumulator());
+    assert(cpu.registers.A == 0x80 && cpu.registers.carryFlag() == 0 && negativeAndZeroAre(&cpu, 1, 0), "carry into bit 7");
+
+    cpu.registers.A = 0b00000001;
+    cpu.registers.setCarryFlag(false);
+    cpu.ror(accumulator());
+    assert(cpu.registers.A == 0x00 && cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 0, 1), "bit 0 into carry");
+
+    cpu.memory.write(0x0010, 0b00000011);
+    cpu.registers.setCarryFlag(true);
+    cpu.ror(memoryAt(0x0010));
+    assert(cpu.memory.read(0x0010) == 0x81 && cpu.registers.carryFlag() == 1 && negativeAndZeroAre(&cpu, 1, 0), "memory");
+}
+
+// Branches
+
+test "a branch taken in the same page takes 1 cycle more" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.setCarryFlag(false);
+    cpu.registers.Pc = 0x0202;
+
+    assert(!cpu.bcc(operandAt(0x0204)), "no page-cross cycle from the table");
+    assert(cpu.registers.Pc == 0x0204, "Pc");
+    assert(cpu.opCyclesLeft == 1, "cycles");
+}
+
+test "a branch taken to another page takes 2 cycles more" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.setCarryFlag(false);
+    cpu.registers.Pc = 0x02F0;
+
+    cpu.bcc(operandAt(0x0310));
+    assert(cpu.registers.Pc == 0x0310, "Pc");
+    assert(cpu.opCyclesLeft == 2, "cycles");
+}
+
+test "a branch not taken leaves Pc and the cycles alone" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.setCarryFlag(true);
+    cpu.registers.Pc = 0x0202;
+
+    cpu.bcc(operandAt(0x0204));
+    assert(cpu.registers.Pc == 0x0202, "Pc");
+    assert(cpu.opCyclesLeft == 0, "cycles");
+}
+
+// Runs a branch from 0x0200 to 0x0210 with Status as given and says whether it jumped
+fn branchTaken(cpu: Cpu6502*, branch: OperationMethod, status: byte) -> bool {
+    cpu.registers.Status = status;
+    cpu.registers.Pc = 0x0200;
+    branch(cpu, operandAt(0x0210));
+    return cpu.registers.Pc == 0x0210;
+}
+
+test "each branch follows its own flag" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    // NV-BDIZC
+    let carry: byte = 0b00000001;
+    let zero: byte = 0b00000010;
+    let overflow: byte = 0b01000000;
+    let negative: byte = 0b10000000;
+    let all: byte = 0xFF;
+
+    assert(branchTaken(&cpu, Cpu6502::bcc, all - carry) && !branchTaken(&cpu, Cpu6502::bcc, carry), "BCC");
+    assert(branchTaken(&cpu, Cpu6502::bcs, carry) && !branchTaken(&cpu, Cpu6502::bcs, all - carry), "BCS");
+    assert(branchTaken(&cpu, Cpu6502::beq, zero) && !branchTaken(&cpu, Cpu6502::beq, all - zero), "BEQ");
+    assert(branchTaken(&cpu, Cpu6502::bne, all - zero) && !branchTaken(&cpu, Cpu6502::bne, zero), "BNE");
+    assert(branchTaken(&cpu, Cpu6502::bmi, negative) && !branchTaken(&cpu, Cpu6502::bmi, all - negative), "BMI");
+    assert(branchTaken(&cpu, Cpu6502::bpl, all - negative) && !branchTaken(&cpu, Cpu6502::bpl, negative), "BPL");
+    assert(branchTaken(&cpu, Cpu6502::bvs, overflow) && !branchTaken(&cpu, Cpu6502::bvs, all - overflow), "BVS");
+    assert(branchTaken(&cpu, Cpu6502::bvc, all - overflow) && !branchTaken(&cpu, Cpu6502::bvc, overflow), "BVC");
+}
+
+// JMP, JSR, RTS, BRK, RTI, NMI, IRQ, NOP
+
+test "JMP sets Pc to the operand address" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    assert(!cpu.jmp(operandAt(0x0100)), "no extra cycle");
+    assert(cpu.registers.Pc == 0x0100, "Pc");
+}
+
+test "JSR pushes the address of its last byte and RTS returns after it" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    // JSR $1234 at 0x0200: when the method runs, Pc already points to 0x0203
+    cpu.registers.Pc = 0x0203;
+
+    cpu.jsr(operandAt(0x1234));
+    assert(cpu.registers.Pc == 0x1234, "jumps");
+    assert(cpu.memory.read(0x01FF) == 0x02, "high byte pushed first");
+    assert(cpu.memory.read(0x01FE) == 0x02, "then the low byte of 0x0202");
+
+    cpu.rts(operandAt(0x0000));
+    assert(cpu.registers.Pc == 0x0203, "returns to the next instruction");
+    assert(cpu.registers.Sp == 0xFF, "Sp back where it started");
+}
+
+test "RTS pulls the address and adds one" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.pushAddress(0x0532);
+
+    cpu.rts(operandAt(0x0000));
+    assert(cpu.registers.Pc == 0x0533, "Pc");
+}
+
+test "BRK pushes Pc + 1 and the status with B, and jumps through 0xFFFE" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Pc = 0x2030;
+    cpu.registers.Status = 0b11100011;
+    cpu.memory.write(0xFFFE, 0x99);
+    cpu.memory.write(0xFFFF, 0x99);
+
+    cpu.brk(operandAt(0x0000));
+    assert(cpu.registers.Pc == 0x9999, "Pc from the vector");
+    assert(cpu.registers.interruptFlag() == 1, "interrupts disabled");
+    assert(cpu.popStack() == 0b11110011, "status pushed with B");
+    assert(cpu.popAddress() == 0x2031, "Pc + 1 pushed");
+}
+
+test "RTI pulls the status and Pc, without adding one" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.pushAddress(0x0532);
+    cpu.pushStack(0xFF);
+
+    cpu.rti(operandAt(0x0000));
+    assert(cpu.registers.Pc == 0x0532, "Pc");
+    assert(cpu.registers.Status == 0xEF, "status without B");
+}
+
+test "NMI pushes Pc and the status without B, and jumps through 0xFFFA" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Pc = 0x2000;
+    cpu.registers.Status = 0xAA;
+    cpu.memory.write(0xFFFA, 0x00);
+    cpu.memory.write(0xFFFB, 0x10);
+
+    cpu.nmi();
+    assert(cpu.registers.Pc == 0x1000, "Pc from the vector");
+    assert(cpu.registers.interruptFlag() == 1, "interrupts disabled");
+    assert(cpu.popStack() == 0xAA, "status");
+    assert(cpu.popAddress() == 0x2000, "Pc");
+}
+
+test "NMI runs even with interrupts disabled" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Pc = 0x2000;
+    cpu.registers.setInterruptFlag(true);
+    cpu.memory.write(0xFFFA, 0x00);
+    cpu.memory.write(0xFFFB, 0x10);
+
+    cpu.nmi();
+    assert(cpu.registers.Pc == 0x1000, "Pc from the vector");
+}
+
+test "IRQ pushes Pc and the status without B, and jumps through 0xFFFE" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Pc = 0x2000;
+    cpu.registers.Status = 0xAA;   // I clear
+    cpu.memory.write(0xFFFE, 0x00);
+    cpu.memory.write(0xFFFF, 0x10);
+
+    cpu.irq();
+    assert(cpu.registers.Pc == 0x1000, "Pc from the vector");
+    assert(cpu.registers.interruptFlag() == 1, "interrupts disabled");
+    assert(cpu.popStack() == 0xAA, "status");
+    assert(cpu.popAddress() == 0x2000, "Pc");
+}
+
+test "IRQ is ignored while interrupts are disabled" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Pc = 0x2000;
+    cpu.registers.setInterruptFlag(true);
+
+    cpu.irq();
+    assert(cpu.registers.Pc == 0x2000, "Pc");
+    assert(cpu.registers.Sp == 0xFF, "nothing pushed");
+}
+
+test "NOP changes nothing" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    let before = cpu.registers;
+
+    assert(!cpu.nop(operandAt(0x0000)), "no extra cycle");
+    assert(cpu.registers.A == before.A && cpu.registers.X == before.X && cpu.registers.Y == before.Y, "A X Y");
+    assert(cpu.registers.Pc == before.Pc && cpu.registers.Sp == before.Sp && cpu.registers.Status == before.Status, "Pc Sp Status");
+}
+
+// ADC, SBC
+
+// Runs ADC or SBC with A, M and C, and checks A and the N Z C V flags
+fn arithmeticGives(cpu: Cpu6502*, op: OperationMethod, a: byte, value: byte, carry: bool,
+                   result: byte, negative: byte, zero: byte, carryOut: byte, overflow: byte) -> bool {
+    cpu.registers.A = a;
+    cpu.registers.setCarryFlag(carry);
+    cpu.memory.write(0x0010, value);
+    op(cpu, operandAt(0x0010));
+    return cpu.registers.A == result
+        && cpu.registers.negativeFlag() == negative
+        && cpu.registers.zeroFlag() == zero
+        && cpu.registers.carryFlag() == carryOut
+        && cpu.registers.overflowFlag() == overflow;
+}
+
+test "ADC adds M and C to A" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.memory.write(0x0010, 0x10);
+    assert(cpu.adc(operandAt(0x0010)), "may take an extra cycle");
+
+    //                                         A     M     C      result N  Z  C  V
+    assert(arithmeticGives(&cpu, Cpu6502::adc, 0x05, 0x10, false, 0x15,  0, 0, 0, 0), "no carry in");
+    assert(arithmeticGives(&cpu, Cpu6502::adc, 0x05, 0x10, true,  0x16,  0, 0, 0, 0), "carry in");
+    assert(arithmeticGives(&cpu, Cpu6502::adc, 0x80, 0x81, false, 0x01,  0, 0, 1, 1), "two negatives give a positive");
+    assert(arithmeticGives(&cpu, Cpu6502::adc, 80,   80,   true,  161,   1, 0, 0, 1), "two positives give a negative");
+    assert(arithmeticGives(&cpu, Cpu6502::adc, 0xFF, 0x01, false, 0x00,  0, 1, 1, 0), "carry out to zero, no overflow");
+    assert(arithmeticGives(&cpu, Cpu6502::adc, 0x7F, 0x01, false, 0x80,  1, 0, 0, 1), "0x7F + 1 overflows");
+}
+
+test "SBC subtracts M and the borrow (not C) from A" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    cpu.memory.write(0x0010, 0x01);
+    assert(cpu.sbc(operandAt(0x0010)), "may take an extra cycle");
+
+    // From http://www.righto.com/2012/12/the-6502-overflow-flag-explained.html
+    //                                         A     M     C      result N  Z  C  V
+    assert(arithmeticGives(&cpu, Cpu6502::sbc, 0x01, 0x01, true,  0x00,  0, 1, 1, 0), "equal");
+    assert(arithmeticGives(&cpu, Cpu6502::sbc, 0x50, 0xF0, true,  0x60,  0, 0, 0, 0), "borrows");
+    assert(arithmeticGives(&cpu, Cpu6502::sbc, 0x50, 0xB0, true,  0xA0,  1, 0, 0, 1), "positive - negative overflows");
+    assert(arithmeticGives(&cpu, Cpu6502::sbc, 0x50, 0x70, true,  0xE0,  1, 0, 0, 0), "negative result");
+    assert(arithmeticGives(&cpu, Cpu6502::sbc, 0x05, 0x01, false, 0x03,  0, 0, 1, 0), "C clear subtracts one more");
+}
+
+// Whole table
+
+test "the table has the 151 official opcodes" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+
+    let official = 0;
+    for i in 0..256 {
+        if cpu.instructions[i].method != NULL {
+            official += 1;
+        }
+    }
+    assert(official == 151, "official opcodes");
+
+    let brk = cpu.instructions[0x00];
+    assert(brk.method == Cpu6502::brk && brk.cycles == 7 && brk.size == 1, "0x00 BRK");
+    let aslA = cpu.instructions[0x0A];
+    assert(aslA.method == Cpu6502::asl && aslA.addressMode == AddressMode::Implicit && aslA.size == 1, "0x0A ASL A");
+    let jmpIndirect = cpu.instructions[0x6C];
+    assert(jmpIndirect.method == Cpu6502::jmp && jmpIndirect.addressMode == AddressMode::Indirect && jmpIndirect.cycles == 5, "0x6C JMP (ind)");
+    let nop = cpu.instructions[0xEA];
+    assert(nop.method == Cpu6502::nop, "0xEA NOP");
+}

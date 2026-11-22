@@ -1,0 +1,130 @@
+import "./ppu.zc";
+
+// What a sprite puts on one pixel of the screen
+@derive(Copy)
+struct SpritePixel {
+    pixel: byte;            // 0-3; 0 is transparent
+    paletteNumber: byte;    // 4-7
+    behindBackground: bool;
+    isSpriteZero: bool;
+}
+
+// The bits of a byte in the opposite order: a horizontally flipped row
+fn reverseBits(value: byte) -> byte {
+    let reversed: byte = 0;
+    for _ in 0..8 {
+        reversed = (reversed << 1) | (value & 0x01);
+        value >>= 1;
+    }
+    return reversed;
+}
+
+// Sprites, simplified from nesdev "PPU sprite evaluation": the hardware
+// searches OAM over dots 65-256 and fetches the patterns over 257-320; here
+// both happen at dot 257. The result is the same, since the next scanline is
+// the first to use it. A sprite's Y in OAM is one less than its first
+// scanline, which is why a scanline looks for the sprites of the next one.
+impl Ppu {
+    fn spriteHeight(self) -> u16 {
+        if (self.control & PPU_CONTROL_SPRITE_8X16) != 0 {
+            return 16;
+        }
+        return 8;
+    }
+
+    // At dot 257 of a visible scanline: the first 8 sprites of OAM that cover
+    // it, with their row of pixels. More than 8 sets the overflow flag
+    // (the hardware's flag has a bug that this does not emulate)
+    fn evaluateSprites(self) {
+        self.lineSpriteCount = 0;
+        let height = self.spriteHeight();
+
+        for sprite in 0..64 {
+            let base = sprite * 4;
+            let y: u16 = (u16)self.oam[base];
+            if self.scanline < y || self.scanline - y >= height {
+                continue;
+            }
+            if self.lineSpriteCount == SPRITES_PER_SCANLINE {
+                self.status |= PPU_STATUS_SPRITE_OVERFLOW;
+                return;
+            }
+
+            let attributes = self.oam[base + 2];
+            let address = self.spritePatternAddress(self.oam[base + 1], attributes, self.scanline - y);
+            let low = self.read(address);
+            let high = self.read(address + 8);
+            if (attributes & SPRITE_FLIP_HORIZONTAL) != 0 {
+                low = reverseBits(low);
+                high = reverseBits(high);
+            }
+
+            self.lineSprites[self.lineSpriteCount] = LineSprite{
+                x: self.oam[base + 3],
+                attributes: attributes,
+                patternLow: low,
+                patternHigh: high,
+                isSpriteZero: sprite == 0,
+            };
+            self.lineSpriteCount += 1;
+        }
+    }
+
+    // The low plane of a row (0-7, or 0-15 for 8x16) of a sprite
+    fn spritePatternAddress(self, tile: byte, attributes: byte, row: u16) -> Address {
+        let height = self.spriteHeight();
+        if (attributes & SPRITE_FLIP_VERTICAL) != 0 {
+            row = height - 1 - row;
+        }
+
+        let table: Address = 0x0000;
+        let tileId: Address = (Address)tile;
+        if height == 16 {
+            // 8x16: bit 0 of the tile picks the table; the even tile is the
+            // top half and the next one the bottom half
+            if (tile & 0x01) != 0 {
+                table = 0x1000;
+            }
+            tileId &= 0xFE;
+            if row >= 8 {
+                tileId += 1;
+                row -= 8;
+            }
+        } else if (self.control & PPU_CONTROL_SPRITE_TABLE) != 0 {
+            table = 0x1000;
+        }
+        return table + (tileId << 4) + row;
+    }
+
+    // The sprite pixel at column x of the scanline being drawn. Sprites
+    // earlier in OAM are in front: the first opaque one wins, even when it is
+    // behind the background and a later one is not (as on the hardware)
+    fn spritePixelAt(self, x: int) -> SpritePixel {
+        let none = SpritePixel{};
+        if (self.mask & PPU_MASK_SPRITES) == 0 {
+            return none;
+        }
+        if x < 8 && (self.mask & PPU_MASK_SPRITES_LEFT) == 0 {
+            return none;
+        }
+
+        for i in 0..(int)self.lineSpriteCount {
+            let sprite = self.lineSprites[i];
+            let column = x - (int)sprite.x;
+            if column < 0 || column > 7 {
+                continue;
+            }
+            let bit = 7 - column;
+            let pixel = (byte)((((sprite.patternHigh >> bit) & 0x01) << 1) | ((sprite.patternLow >> bit) & 0x01));
+            if pixel != 0 {
+                return SpritePixel{
+                    pixel: pixel,
+                    paletteNumber: 4 + (sprite.attributes & SPRITE_PALETTE),
+                    behindBackground: (sprite.attributes & SPRITE_BEHIND_BACKGROUND) != 0,
+                    isSpriteZero: sprite.isSpriteZero,
+                };
+            }
+        }
+        return none;
+    }
+}

@@ -1,0 +1,92 @@
+import "../src/nes/cpu_bus.zc";
+import "../src/nes/cpu.zc";
+
+// nestest.nes: NROM with 16 KB of PRG, JMP $C5F5 at 0xC000
+fn nestest() -> GamePak {
+    return GamePak::createFromFilePath("tests/roms/nestest/nestest.nes");
+}
+
+test "the 2 KB of RAM repeat every 0x0800 bytes up to 0x1FFF" {
+    let pak = nestest();
+    let bus = CpuBus::create(&pak);
+
+    bus.write(0x0001, 0x42);
+    assert(bus.read(0x0001) == 0x42, "RAM");
+    assert(bus.read(0x0801) == 0x42, "first mirror");
+    assert(bus.read(0x1001) == 0x42, "second mirror");
+    assert(bus.read(0x1801) == 0x42, "third mirror");
+
+    bus.write(0x1FFF, 0x24);   // through a mirror
+    assert(bus.read(0x07FF) == 0x24, "last RAM byte");
+}
+
+test "the PPU, APU and I/O registers read 0 and do not reach the RAM" {
+    let pak = nestest();
+    let bus = CpuBus::create(&pak);
+    bus.write(0x0000, 0x11);
+
+    bus.write(0x2000, 0x99);
+    bus.write(0x4014, 0x99);
+    assert(bus.read(0x2000) == 0x00, "PPU register");
+    assert(bus.read(0x4016) == 0x00, "controller register");
+    assert(bus.read(0x0000) == 0x11, "RAM untouched");
+}
+
+test "from 0x4020 up the bus reads the cartridge" {
+    let pak = nestest();
+    let bus = CpuBus::create(&pak);
+
+    assert(bus.read(0xC000) == 0x4C, "JMP at 0xC000");
+    assert(bus.read(0x8000) == 0x4C, "0x8000 mirrors it (16 KB of PRG)");
+
+    bus.write(0xC000, 0x00);
+    assert(bus.read(0xC000) == 0x4C, "PRG ROM is not written");
+}
+
+test "the CPU runs code from the cartridge through the bus" {
+    let pak = nestest();
+    let bus = CpuBus::create(&pak);
+    let cpu = Cpu6502::create(&bus);
+    cpu.registers.Pc = 0xC000;
+
+    cpu.tick();   // JMP $C5F5
+    assert(cpu.registers.Pc == 0xC5F5, "jumped where nestest.log says");
+}
+
+// --- OAM DMA ---
+
+fn fillPage(bus: CpuBus*, page: byte) {
+    for i in 0..256 {
+        bus.write(((Address)page << 8) + (Address)i, (byte)i);
+    }
+}
+
+// From Go: TestOAMDMA, which was empty
+test "a write to 0x4014 copies that page of RAM into OAM" {
+    let pak = nestest();
+    let bus = CpuBus::create(&pak);
+    fillPage(&bus, 0x02);
+
+    bus.write(0x4014, 0x02);
+
+    for i in 0..256 {
+        assert(bus.ppu.oam[i] == (byte)i, "OAM byte copied");
+    }
+    assert(bus.ppu.oamAddress == 0, "256 writes bring OAMADDR back where it was");
+    assert(bus.takeDmaRequest(), "the CPU has to stop");
+    assert(!bus.takeDmaRequest(), "only once");
+}
+
+// Not in Go, which always started at 0 and changed OAMADDR
+test "the OAM DMA starts at OAMADDR and wraps" {
+    let pak = nestest();
+    let bus = CpuBus::create(&pak);
+    fillPage(&bus, 0x03);
+    bus.write(0x2003, 0x10);   // OAMADDR
+
+    bus.write(0x4014, 0x03);
+
+    assert(bus.ppu.oam[0x10] == 0x00, "first byte of the page at OAMADDR");
+    assert(bus.ppu.oam[0x0F] == 0xFF, "last byte wrapped to just before it");
+    assert(bus.ppu.oamAddress == 0x10, "OAMADDR back where it was");
+}

@@ -1,0 +1,89 @@
+import "../src/nes/cpu_bus.zc";
+
+// Reads the 8 buttons after a strobe, A first, packed back into a byte
+fn readAll(controller: Controller*) -> u8 {
+    let state: u8 = 0;
+    for _ in 0..8 {
+        state = (state << 1) | controller.read();
+    }
+    return state;
+}
+
+test "after a strobe, reads give A, B, Select, Start, Up, Down, Left, Right" {
+    let controller = Controller{ buttons: CONTROLLER_A | CONTROLLER_START | CONTROLLER_RIGHT };
+    controller.write(1);
+    controller.write(0);
+
+    assert(controller.read() == 1, "A");
+    assert(controller.read() == 0, "B");
+    assert(controller.read() == 0, "Select");
+    assert(controller.read() == 1, "Start");
+    assert(controller.read() == 0, "Up");
+    assert(controller.read() == 0, "Down");
+    assert(controller.read() == 0, "Left");
+    assert(controller.read() == 1, "Right");
+}
+
+// Not in Go, which read 0 from then on
+test "after the 8 buttons, an official controller reads 1" {
+    let controller = Controller{};
+    controller.write(1);
+    controller.write(0);
+    readAll(&controller);
+
+    assert(controller.read() == 1, "ninth read");
+    assert(controller.read() == 1, "and the ones after it");
+}
+
+// Not in Go
+test "while the strobe is set, every read gives A" {
+    let controller = Controller{ buttons: CONTROLLER_A };
+    controller.write(1);
+
+    assert(controller.read() == 1 && controller.read() == 1, "A again and again");
+    controller.buttons = 0;
+    assert(controller.read() == 0, "and it follows the button");
+}
+
+test "buttons pressed after the strobe wait for the next one" {
+    let controller = Controller{ buttons: CONTROLLER_B };
+    controller.write(1);
+    controller.write(0);
+    controller.buttons = CONTROLLER_A;
+
+    assert(readAll(&controller) == CONTROLLER_B, "latched B");
+    controller.write(1);
+    controller.write(0);
+    assert(readAll(&controller) == CONTROLLER_A, "A after the new strobe");
+}
+
+fn nestest() -> GamePak {
+    return GamePak::createFromFilePath("tests/roms/nestest/nestest.nes");
+}
+
+// Not in Go: there, only a write to 0x4017 latched controller 2
+test "a write to 0x4016 strobes both controllers, and 0x4017 reads the second" {
+    let pak = nestest();
+    let bus = CpuBus::create(&pak);
+    bus.controllers[0].buttons = CONTROLLER_A;
+    bus.controllers[1].buttons = CONTROLLER_B;
+
+    bus.write(0x4016, 1);
+    bus.write(0x4016, 0);
+
+    assert(bus.read(0x4016) == 1, "controller 1: A");
+    assert(bus.read(0x4017) == 0, "controller 2: no A");
+    assert(bus.read(0x4017) == 1, "controller 2: B");
+}
+
+// Not in Go: 0x4017 is the APU frame counter for writes
+test "a write to 0x4017 does not strobe the controllers" {
+    let pak = nestest();
+    let bus = CpuBus::create(&pak);
+    bus.controllers[1].buttons = CONTROLLER_A;
+
+    bus.write(0x4017, 1);
+    bus.write(0x4017, 0);
+
+    assert(bus.read(0x4017) == 0, "nothing latched");
+}

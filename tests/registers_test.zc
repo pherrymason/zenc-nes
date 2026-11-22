@@ -1,0 +1,164 @@
+import "../src/nes/cpu/registers.zc";
+
+test "negative flag is set when bit 7 is set" {
+    let registers = Registers::create();
+    registers.updateNegativeFlag(0x80);
+
+    assert(registers.negativeFlag() == 1, "N");
+}
+
+test "negative flag is unset when bit 7 is clear" {
+    let registers = Registers::create();
+    registers.updateNegativeFlag(0x7F);
+
+    assert(registers.negativeFlag() == 0, "N");
+}
+
+test "zero flag is set when the value is zero" {
+    let registers = Registers::create();
+    registers.updateZeroFlag(0x00);
+
+    assert(registers.zeroFlag() == 1, "Z");
+}
+
+test "zero flag is unset when the value is not zero" {
+    let registers = Registers::create();
+    registers.updateZeroFlag(0x01);
+
+    assert(registers.zeroFlag() == 0, "Z");
+}
+
+test "setting a flag only changes its own bit" {
+    let registers = Registers::create();    // Status = 0x20
+    registers.setCarryFlag(true);
+    assert(registers.Status == 0x21, "C set");
+
+    registers.setOverflowFlag(true);
+    assert(registers.Status == 0x61, "V set, C kept");
+
+    registers.setCarryFlag(false);
+    assert(registers.Status == 0x60, "C unset, V kept");
+    assert(registers.carryFlag() == 0, "C reads 0");
+    assert(registers.overflowFlag() == 1, "V reads 1");
+}
+
+test "each flag reads its own bit" {
+    let registers = Registers::create();
+    registers.Status = 0b11011111;   // NV-BDIZC: every flag set except bit 5
+
+    assert(registers.carryFlag() == 1, "C");
+    assert(registers.zeroFlag() == 1, "Z");
+    assert(registers.interruptFlag() == 1, "I");
+    assert(registers.decimalFlag() == 1, "D");
+    assert(registers.breakFlag() == 1, "B");
+    assert(registers.overflowFlag() == 1, "V");
+    assert(registers.negativeFlag() == 1, "N");
+
+    registers.Status = 0b00100000;   // only bit 5
+    assert(registers.carryFlag() == 0, "C clear");
+    assert(registers.zeroFlag() == 0, "Z clear");
+    assert(registers.interruptFlag() == 0, "I clear");
+    assert(registers.decimalFlag() == 0, "D clear");
+    assert(registers.breakFlag() == 0, "B clear");
+    assert(registers.overflowFlag() == 0, "V clear");
+    assert(registers.negativeFlag() == 0, "N clear");
+}
+
+test "each setter sets its own bit" {
+    let registers = Registers::create();
+    registers.Status = 0x00;
+
+    registers.setCarryFlag(true);
+    assert(registers.Status == 0x01, "C");
+    registers.setZeroFlag(true);
+    assert(registers.Status == 0x03, "Z");
+    registers.setInterruptFlag(true);
+    assert(registers.Status == 0x07, "I");
+    registers.setDecimalFlag(true);
+    assert(registers.Status == 0x0F, "D");
+    registers.setOverflowFlag(true);
+    assert(registers.Status == 0x4F, "V");
+    registers.setNegativeFlag(true);
+    assert(registers.Status == 0xCF, "N");
+}
+
+test "the status register always reads bit 5 as set" {
+    let registers = Registers::create();
+    registers.Status = 0x00;
+
+    assert(registers.statusRegister() == 0x20, "bit 5");
+}
+
+test "loading the status discards bit 4 and sets bit 5" {
+    let registers = Registers::create();
+
+    registers.loadStatusRegisterIgnoring5and4(0xFF);
+    assert(registers.Status == 0xEF, "from all ones");
+
+    registers.loadStatusRegisterIgnoring5and4(0x00);
+    assert(registers.Status == 0x20, "from all zeros");
+}
+
+test "the stack address is in page 1" {
+    let registers = Registers::create();
+    registers.Sp = 0xFD;
+
+    assert(registers.stackPointerAddress() == 0x01FD, "0x0100 + Sp");
+}
+
+test "pushing wraps the stack pointer from 0x00 to 0xFF" {
+    let registers = Registers::create();
+    registers.Sp = 0x01;
+
+    registers.stackPointerPushed();
+    assert(registers.Sp == 0x00, "one down");
+
+    registers.stackPointerPushed();
+    assert(registers.Sp == 0xFF, "wraps");
+    assert(registers.stackPointerAddress() == 0x01FF, "stays in page 1");
+}
+
+test "popping wraps the stack pointer from 0xFF to 0x00" {
+    let registers = Registers::create();
+    registers.Sp = 0xFE;
+
+    registers.stackPointerPopped();
+    assert(registers.Sp == 0xFF, "one up");
+
+    registers.stackPointerPopped();
+    assert(registers.Sp == 0x00, "wraps");
+    assert(registers.stackPointerAddress() == 0x0100, "stays in page 1");
+}
+
+test "reset leaves the power on state" {
+    let registers = Registers::create();
+    registers.A = 0x11;
+    registers.X = 0x22;
+    registers.Y = 0x33;
+    registers.Sp = 0x44;
+    registers.Pc = 0x5555;
+    registers.Status = 0xFF;
+
+    registers.reset();
+
+    assert(registers.A == 0x00, "A");
+    assert(registers.X == 0x00, "X");
+    assert(registers.Y == 0x00, "Y");
+    assert(registers.Sp == 0xFD, "Sp");
+    assert(registers.Pc == RESET_VECTOR_ADDRESS, "Pc");
+    assert(registers.Status == 0x24, "Status: bit 5 and I");
+    assert(registers.interruptFlag() == 1, "interrupts disabled");
+}
+
+test "N and Z are updated together from a value" {
+    let registers = Registers::create();
+
+    registers.updateNegativeAndZeroFlags(0x00);
+    assert(registers.negativeFlag() == 0 && registers.zeroFlag() == 1, "zero");
+
+    registers.updateNegativeAndZeroFlags(0x80);
+    assert(registers.negativeFlag() == 1 && registers.zeroFlag() == 0, "negative");
+
+    registers.updateNegativeAndZeroFlags(0x20);
+    assert(registers.negativeFlag() == 0 && registers.zeroFlag() == 0, "positive");
+}

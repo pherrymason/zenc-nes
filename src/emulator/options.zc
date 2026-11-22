@@ -1,0 +1,9 @@
+@derive(Copy)
+struct Options {
+    videoScale: int;
+    romPath: string;
+    logCPU: bool;
+    debugPPU: bool;
+    breakpoint: string;
+    cpuProfile: bool;
+}

@@ -1,0 +1,479 @@
+import "../src/nes/nes.zc";
+
+// Ticks until the PPU is about to run the given dot
+fn tickUntil(ppu: Ppu*, scanline: u16, dot: u16) {
+    while ppu.scanline != scanline || ppu.dot != dot {
+        ppu.tick();
+    }
+}
+
+fn hasVblank(ppu: Ppu*) -> bool {
+    return (ppu.status & PPU_STATUS_VBLANK) != 0;
+}
+
+test "vblank starts at dot 1 of scanline 241" {
+    let ppu = Ppu::create(NULL);
+
+    tickUntil(&ppu, 241, 1);
+    assert(!hasVblank(&ppu), "not before dot 1");
+
+    ppu.tick();
+    assert(hasVblank(&ppu), "set by dot 1");
+}
+
+test "vblank raises an NMI only when PPUCTRL bit 7 is set" {
+    let off = Ppu::create(NULL);
+    tickUntil(&off, 241, 2);
+    assert(!off.takeNmi(), "no NMI with bit 7 clear");
+
+    let on = Ppu::create(NULL);
+    on.writeRegister(PPU_CTRL, PPU_CONTROL_NMI);
+    tickUntil(&on, 241, 2);
+    assert(on.takeNmi(), "NMI with bit 7 set");
+    assert(!on.takeNmi(), "taken only once");
+}
+
+test "turning the NMI on inside vblank raises it at once" {
+    let ppu = Ppu::create(NULL);
+    tickUntil(&ppu, 250, 0);   // inside vblank, NMI off
+    assert(!ppu.takeNmi(), "nothing yet");
+
+    ppu.writeRegister(PPU_CTRL, PPU_CONTROL_NMI);
+    assert(ppu.takeNmi(), "raised by the write");
+
+    ppu.writeRegister(PPU_CTRL, PPU_CONTROL_NMI);
+    assert(!ppu.takeNmi(), "writing it again while on does not raise another");
+}
+
+test "reading PPUSTATUS returns the vblank flag and clears it" {
+    let ppu = Ppu::create(NULL);
+    tickUntil(&ppu, 241, 2);
+
+    assert((ppu.readRegister(PPU_STATUS) & PPU_STATUS_VBLANK) != 0, "first read sees vblank");
+    assert((ppu.readRegister(PPU_STATUS) & PPU_STATUS_VBLANK) == 0, "second read does not");
+}
+
+test "the pre-render scanline clears vblank, sprite 0 hit and overflow" {
+    let ppu = Ppu::create(NULL);
+    tickUntil(&ppu, 261, 1);
+    ppu.status = PPU_STATUS_VBLANK | PPU_STATUS_SPRITE_ZERO_HIT | PPU_STATUS_SPRITE_OVERFLOW;
+
+    ppu.tick();
+    assert(ppu.status == 0, "all three cleared");
+}
+
+test "a frame is 262 scanlines of 341 dots" {
+    let ppu = Ppu::create(NULL);
+    let dots: u32 = 0;
+    while !ppu.takeFrameComplete() {
+        ppu.tick();
+        dots += 1;
+    }
+
+    assert(dots == 341 * 262, "dots in a frame");
+    assert(ppu.frameNumber == 1 && ppu.scanline == 0 && ppu.dot == 0, "back at the top");
+}
+
+test "the CPU bus reaches the PPU registers through their mirrors" {
+    let pak = GamePak::createFromFilePath("tests/roms/nestest/nestest.nes");
+    let bus = CpuBus::create(&pak);
+
+    bus.write(0x3FF8, 0x80);   // mirror of PPUCTRL
+    assert(bus.ppu.control == 0x80, "PPUCTRL written");
+
+    bus.ppu.status = PPU_STATUS_VBLANK;
+    assert(bus.read(0x2FFA) == PPU_STATUS_VBLANK, "mirror of PPUSTATUS read");
+    assert(bus.ppu.status == 0, "the read cleared vblank");
+}
+
+test "a Nes frame takes 89342 master clock cycles" {
+    let pak = GamePak::createFromFilePath("tests/roms/nestest/nestest.nes");
+    let nes = Nes::create(&pak);
+    nes.start();
+
+    nes.tickTillFrameComplete();
+    assert(nes.systemClockCounter == 341 * 262, "one frame");
+    assert(nes.bus.ppu.frameNumber == 1, "frame number");
+}
+
+// --- PPU memory ---
+
+fn assertNameTableIndex(mirroring: byte, address: Address, expected: u16) {
+    assert(nameTableIndex(mirroring, address) == expected, f"0x{address:04X} should land at 0x{expected:03X}");
+}
+
+// From the Go table: tables 0 and 2 are A, 1 and 3 are B
+test "vertical mirroring: 0x2800 mirrors 0x2000 and 0x2C00 mirrors 0x2400" {
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x2000, 0x000);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x23FF, 0x3FF);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x2800, 0x000);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x2BFF, 0x3FF);
+
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x2400, 0x400);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x27FF, 0x7FF);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x2C00, 0x400);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x2FFF, 0x7FF);
+}
+
+// From the Go table: tables 0 and 1 are A, 2 and 3 are B
+test "horizontal mirroring: 0x2400 mirrors 0x2000 and 0x2C00 mirrors 0x2800" {
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x2000, 0x000);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x23FF, 0x3FF);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x2400, 0x000);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x27FF, 0x3FF);
+
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x2800, 0x400);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x2BFF, 0x7FF);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x2C00, 0x400);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x2FFF, 0x7FF);
+}
+
+// The Go table had this case empty
+test "one-screen mirroring: the four tables are A" {
+    assertNameTableIndex(ONE_SCREEN_MIRRORING, 0x2000, 0x000);
+    assertNameTableIndex(ONE_SCREEN_MIRRORING, 0x2400, 0x000);
+    assertNameTableIndex(ONE_SCREEN_MIRRORING, 0x2800, 0x000);
+    assertNameTableIndex(ONE_SCREEN_MIRRORING, 0x2C00, 0x000);
+    assertNameTableIndex(ONE_SCREEN_MIRRORING, 0x2FFF, 0x3FF);
+}
+
+// Not in Go: the cartridge adds 2 KB, so the four tables are real
+test "four-screen: each table has its own memory" {
+    assertNameTableIndex(FOUR_SCREEN_MIRRORING, 0x2000, 0x000);
+    assertNameTableIndex(FOUR_SCREEN_MIRRORING, 0x2400, 0x400);
+    assertNameTableIndex(FOUR_SCREEN_MIRRORING, 0x2800, 0x800);
+    assertNameTableIndex(FOUR_SCREEN_MIRRORING, 0x2C00, 0xC00);
+    assertNameTableIndex(FOUR_SCREEN_MIRRORING, 0x2FFF, 0xFFF);
+}
+
+// From the Go table, plus 0x3D00: Go's `& 0x2FF` dropped its bit 8 and gave 0x400
+test "0x3000-0x3EFF mirrors 0x2000-0x2EFF" {
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x3000, 0x000);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x33FF, 0x3FF);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x3400, 0x400);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x37FF, 0x7FF);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x3800, 0x000);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x3C00, 0x400);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x3D00, 0x500);
+    assertNameTableIndex(VERTICAL_MIRRORING, 0x3EFF, 0x6FF);
+
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x3000, 0x000);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x3400, 0x000);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x37FF, 0x3FF);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x3800, 0x400);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x3BFF, 0x7FF);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x3C00, 0x400);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x3D00, 0x500);
+    assertNameTableIndex(HORIZONTAL_MIRRORING, 0x3EFF, 0x6FF);
+}
+
+// Not in Go: its palette test always read the address it had just written
+test "sprite palettes share their first colour with the background palette below" {
+    assert(paletteIndex(0x3F10) == 0x00, "0x3F10 is 0x3F00");
+    assert(paletteIndex(0x3F14) == 0x04, "0x3F14 is 0x3F04");
+    assert(paletteIndex(0x3F18) == 0x08, "0x3F18 is 0x3F08");
+    assert(paletteIndex(0x3F1C) == 0x0C, "0x3F1C is 0x3F0C");
+    assert(paletteIndex(0x3F11) == 0x11, "the other sprite colours have their own byte");
+    assert(paletteIndex(0x3F20) == 0x00, "0x3F20 mirrors 0x3F00");
+    assert(paletteIndex(0x3FFF) == 0x1F, "0x3FFF mirrors 0x3F1F");
+}
+
+// nestest.nes: NROM, horizontal mirroring (flags6 = 0), 8 KB of CHR ROM
+fn loadNestest() -> GamePak {
+    return GamePak::createFromFilePath("tests/roms/nestest/nestest.nes");
+}
+
+// From Go: TestPPU_writes_and_reads_into_palette
+test "what is written into the palette reads back" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+
+    for i in 0..32 {
+        let address: Address = 0x3F00 + (Address)i;
+        let colour: byte = (byte)(i + 1);
+        ppu.write(address, colour);
+        assert(ppu.read(address) == colour, f"0x{address:04X} reads back");
+    }
+}
+
+// From Go: TestPPUMemory_write_nametables
+test "a write through a nametable mirror lands on the same byte" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+
+    // Horizontal, from the header
+    ppu.write(0x2000, 0xFF);
+    assert(ppu.nameTables[0x000] == 0xFF, "0x2000 is byte 0x000");
+    ppu.write(0x2400, 0xF1);
+    assert(ppu.nameTables[0x000] == 0xF1, "0x2400 is byte 0x000 too");
+    ppu.write(0x2BFF, 0xFF);
+    assert(ppu.nameTables[0x7FF] == 0xFF, "0x2BFF is byte 0x7FF");
+    ppu.write(0x2FFF, 0xF1);
+    assert(ppu.nameTables[0x7FF] == 0xF1, "0x2FFF is byte 0x7FF too");
+
+    // Vertical: the PPU asks the cartridge on every access
+    pak.header.flags6 = 0x01;
+    ppu.write(0x2400, 0xFF);
+    assert(ppu.nameTables[0x400] == 0xFF, "0x2400 is byte 0x400");
+    ppu.write(0x2C00, 0xF1);
+    assert(ppu.nameTables[0x400] == 0xF1, "0x2C00 is byte 0x400 too");
+    assert(ppu.read(0x2800) == ppu.read(0x2000), "0x2800 reads 0x2000");
+}
+
+// Not in Go, which panicked: the bus has 14 address lines
+test "addresses above 0x3FFF mirror the PPU bus" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+
+    ppu.write(0x7F01, 0x2A);
+    assert(ppu.read(0x3F01) == 0x2A, "0x7F01 is 0x3F01");
+    assert(ppu.read(0x4010) == ppu.read(0x0010), "0x4010 reads the CHR at 0x0010");
+}
+
+// Not in Go
+test "writes into CHR ROM are ignored" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+
+    let before = ppu.read(0x0000);
+    ppu.write(0x0000, ~before);
+    assert(ppu.read(0x0000) == before, "CHR ROM unchanged");
+}
+
+// --- v, t, fine X and the write latch ---
+
+// From Go: TestPPUSCROLL_writes_twice
+test "PPUSCROLL writes X, then Y" {
+    let ppu = Ppu::create(NULL);
+
+    ppu.writeRegister(PPU_SCROLL, 0xFF);
+    assert(ppu.t.value == 0x001F, "coarse X");
+    assert(ppu.fineX == 0x07, "fine X");
+    assert(ppu.writeLatch, "next write is the second");
+
+    ppu.writeRegister(PPU_SCROLL, 0xFF);
+    assert(ppu.t.value == 0x73FF, "coarse Y and fine Y");
+    assert(!ppu.writeLatch, "next write is the first again");
+}
+
+// From Go: TestPPU_PPUADDR_write_twice_to_set_address
+test "PPUADDR writes the high byte, then the low one, and copies t into v" {
+    let ppu = Ppu::create(NULL);
+    ppu.writeRegister(PPU_ADDR, 0x28);
+    ppu.writeRegister(PPU_ADDR, 0x10);
+    assert(ppu.t.value == 0x2810 && ppu.v.value == 0x2810, "0x2810");
+
+    let mirrored = Ppu::create(NULL);
+    mirrored.writeRegister(PPU_ADDR, 0x40);
+    mirrored.writeRegister(PPU_ADDR, 0x20);
+    assert(mirrored.v.value == 0x0020, "0x4020 mirrors down to 0x0020");
+}
+
+// Not in Go
+test "the first write of PPUADDR does not change v" {
+    let ppu = Ppu::create(NULL);
+    ppu.writeRegister(PPU_ADDR, 0x23);
+    assert(ppu.t.value == 0x2300, "t has the high byte");
+    assert(ppu.v.value == 0x0000, "v waits for the low byte");
+}
+
+// From Go: TestPPU_PPUSTATUS_reading_status_clears_bit7_and_the_address_latch
+test "reading PPUSTATUS resets the write latch" {
+    let ppu = Ppu::create(NULL);
+    ppu.writeRegister(PPU_ADDR, 0x21);
+    ppu.readRegister(PPU_STATUS);
+    ppu.writeRegister(PPU_ADDR, 0x23);
+    ppu.writeRegister(PPU_ADDR, 0x05);
+    assert(ppu.v.value == 0x2305, "0x23 was taken as the high byte");
+}
+
+// Not in Go: both registers flip the same latch
+test "PPUSCROLL and PPUADDR share the write latch" {
+    let ppu = Ppu::create(NULL);
+    ppu.writeRegister(PPU_SCROLL, 0x00);
+    ppu.writeRegister(PPU_ADDR, 0x05);
+    assert(ppu.v.value == 0x0005, "the PPUADDR write was the second one");
+}
+
+// Not in Go
+test "PPUCTRL puts its nametable bits into bits 10-11 of t" {
+    let ppu = Ppu::create(NULL);
+    ppu.t.value = 0x73FF;
+    ppu.writeRegister(PPU_CTRL, 0x03);
+    assert(ppu.t.value == 0x7FFF, "nametable 3");
+    ppu.writeRegister(PPU_CTRL, 0x01);
+    assert(ppu.t.value == 0x77FF, "nametable 1, the rest untouched");
+}
+
+// --- PPUDATA ---
+
+// From Go: TestPPU_PPUData_read, going across
+test "PPUDATA reads are one access late, and v moves 1 across" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+    ppu.write(0x2600, 0x15);
+    ppu.v.value = 0x2600;
+
+    assert(ppu.readRegister(PPU_DATA) == 0x00, "first read returns the old buffer");
+    assert(ppu.v.value == 0x2601, "v moved 1");
+    assert(ppu.readRegister(PPU_DATA) == 0x15, "second read returns 0x2600");
+    assert(ppu.v.value == 0x2602, "v moved 1 again");
+}
+
+// From Go: TestPPU_PPUData_read, going down
+test "with PPUCTRL bit 2, PPUDATA moves v 32 down" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+    ppu.write(0x2600, 0x15);
+    ppu.writeRegister(PPU_CTRL, PPU_CONTROL_INCREMENT_32);
+    ppu.v.value = 0x2600;
+
+    ppu.readRegister(PPU_DATA);
+    assert(ppu.v.value == 0x2620, "v moved 32");
+    assert(ppu.readRegister(PPU_DATA) == 0x15, "second read returns 0x2600");
+    assert(ppu.v.value == 0x2640, "v moved 32 again");
+}
+
+// From Go: TestPPU_PPUData_read, palette cases
+test "PPUDATA reads from the palette are not delayed" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+    ppu.write(0x3F00, 0x20);
+    ppu.v.value = 0x3F00;
+
+    assert(ppu.readRegister(PPU_DATA) == 0x20, "the palette answers at once");
+}
+
+// Not in Go, which put the palette colour in the buffer
+test "a palette read fills the buffer with the nametable byte underneath" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+    ppu.write(0x3F00, 0x20);
+    ppu.write(0x2F00, 0x5A);   // 0x3F00 - 0x1000
+    ppu.v.value = 0x3F00;
+
+    ppu.readRegister(PPU_DATA);
+    ppu.v.value = 0x2000;
+    assert(ppu.readRegister(PPU_DATA) == 0x5A, "the buffer had 0x2F00");
+}
+
+// From Go: TestPPU_PPUData_write
+test "PPUDATA writes at v and moves it" {
+    let pak = loadNestest();
+    let ppu = Ppu::create(&pak);
+
+    ppu.v.value = 0x2600;
+    ppu.writeRegister(PPU_DATA, 0x15);
+    assert(ppu.read(0x2600) == 0x15, "nametable written");
+    assert(ppu.v.value == 0x2601, "v moved 1");
+
+    ppu.writeRegister(PPU_CTRL, PPU_CONTROL_INCREMENT_32);
+    ppu.v.value = 0x2600;
+    ppu.writeRegister(PPU_DATA, 0x16);
+    assert(ppu.read(0x2600) == 0x16, "nametable written again");
+    assert(ppu.v.value == 0x2620, "v moved 32");
+
+    ppu.writeRegister(PPU_CTRL, 0);
+    ppu.v.value = 0x3F00;
+    ppu.writeRegister(PPU_DATA, 0x20);
+    assert(ppu.read(0x3F00) == 0x20, "palette, low edge");
+
+    ppu.v.value = 0x3FFF;
+    ppu.writeRegister(PPU_DATA, 0x21);
+    assert(ppu.read(0x3FFF) == 0x21, "palette, high edge");
+    assert((ppu.v.value & PPU_ADDRESS_MASK) == 0x0000, "v past 0x3FFF reaches 0x0000 on the bus");
+}
+
+// Not in Go: the whole path a game uses, through the CPU bus
+test "the CPU fills and reads back a nametable through PPUADDR and PPUDATA" {
+    let pak = loadNestest();
+    let bus = CpuBus::create(&pak);
+
+    bus.read(0x2002);           // reset the latch, as games do
+    bus.write(0x2006, 0x21);
+    bus.write(0x2006, 0x08);
+    for i in 0..4 {
+        bus.write(0x2007, (byte)(0x41 + i));
+    }
+    assert(bus.ppu.read(0x2108) == 0x41 && bus.ppu.read(0x210B) == 0x44, "four bytes from 0x2108");
+
+    bus.write(0x2006, 0x21);
+    bus.write(0x2006, 0x08);
+    bus.read(0x2007);           // dummy read: fills the buffer
+    assert(bus.read(0x2007) == 0x41, "0x2108");
+    assert(bus.read(0x2007) == 0x42, "0x2109");
+}
+
+// --- OAM ---
+
+// From Go: TestPPUOAM_address_write and TestPPUOAM_should_be_able_to_write
+test "OAMDATA writes at OAMADDR and moves it" {
+    let ppu = Ppu::create(NULL);
+    ppu.writeRegister(PPU_OAM_ADDR, 0x10);
+    ppu.writeRegister(PPU_OAM_DATA, 0xAA);
+    ppu.writeRegister(PPU_OAM_DATA, 0xBB);
+
+    assert(ppu.oam[0x10] == 0xAA && ppu.oam[0x11] == 0xBB, "two bytes from 0x10");
+    assert(ppu.oamAddress == 0x12, "OAMADDR moved twice");
+}
+
+// Not in Go, which needed `& 0xFF`: a byte wraps by itself
+test "OAMADDR wraps from 255 to 0" {
+    let ppu = Ppu::create(NULL);
+    ppu.writeRegister(PPU_OAM_ADDR, 0xFF);
+    ppu.writeRegister(PPU_OAM_DATA, 0x01);
+    ppu.writeRegister(PPU_OAM_DATA, 0x02);
+
+    assert(ppu.oam[0xFF] == 0x01 && ppu.oam[0x00] == 0x02, "wrapped");
+}
+
+// From Go: TestPPUOAM_should_be_able_to_read
+test "OAMDATA reads do not move OAMADDR" {
+    let ppu = Ppu::create(NULL);
+    ppu.oam[0] = 0xFF;
+
+    assert(ppu.readRegister(PPU_OAM_DATA) == 0xFF, "Y of sprite 0");
+    assert(ppu.readRegister(PPU_OAM_DATA) == 0xFF, "the same byte again");
+    assert(ppu.oamAddress == 0, "OAMADDR did not move");
+}
+
+// Not in Go, which returned what was written
+test "bits 2-4 of the sprite attributes read as 0" {
+    let ppu = Ppu::create(NULL);
+    ppu.oam[1] = 0xFF;   // tile
+    ppu.oam[2] = 0xFF;   // attributes
+
+    ppu.writeRegister(PPU_OAM_ADDR, 1);
+    assert(ppu.readRegister(PPU_OAM_DATA) == 0xFF, "the tile keeps every bit");
+    ppu.writeRegister(PPU_OAM_ADDR, 2);
+    assert(ppu.readRegister(PPU_OAM_DATA) == 0xE3, "the attributes lose bits 2-4");
+}
+
+// Not in Go: the CPU stops while the DMA runs.
+// Program in RAM: LDA #$02 (2 cycles), STA $4014 (4), NOP (2)
+test "an OAM DMA halts the CPU for 513 cycles, 514 from an odd one" {
+    let pak = loadNestest();
+    let nes = Nes::create(&pak);
+    nes.start();
+    let program: byte[6] = [0xA9, 0x02, 0x8D, 0x14, 0x40, 0xEA];
+    for i in 0..6 {
+        nes.bus.write((Address)i, program[i]);
+    }
+    nes.cpu.resetToAddress(0x0000);   // cycle 7
+
+    while nes.cpu.registers.Pc != 0x0005 {   // until STA has run
+        nes.tick();
+    }
+    // STA ran on cycles 9-12, so its count ends on 13: odd
+    assert(nes.dmaCyclesLeft == 514, "513 plus 1 to line up");
+
+    let cpuCycles = 0;
+    while nes.cpu.registers.Pc != 0x0006 {   // until NOP has run
+        if nes.systemClockCounter % 3 == 0 {
+            cpuCycles += 1;
+        }
+        nes.tick();
+    }
+    assert(cpuCycles == 514 + 3 + 1, "the DMA, the rest of STA and the first cycle of NOP");
+    assert(nes.cpu.cycle == 13 + 514 + 2, "the cycle count includes the halt");
+}

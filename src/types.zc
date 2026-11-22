@@ -1,0 +1,23 @@
+
+alias Word = u16;
+alias Address = Word;
+impl Address {
+    fn from(high: byte, low: byte) -> Address {
+        return ((Address)high << 8) | (Address)low;
+    }
+}
+
+@derive(Copy);
+struct Pixel { r: u8; g: u8; b: u8; a: u8; }
+
+def SCREEN_WIDTH = 256;
+def SCREEN_HEIGHT = 240;
+struct Frame {
+    pixels: Pixel[SCREEN_WIDTH * SCREEN_HEIGHT];
+}
+
+impl Frame {
+    fn set(self, x: int, y: int, p: Pixel) {
+        self.pixels[y * SCREEN_WIDTH + x] = p;
+    }
+}

@@ -1,0 +1,111 @@
+import "../gamepak/gamepak.zc";
+import "./cpu_bus.zc";
+import "./cpu.zc";
+import "./controller.zc";
+import "./cpu/instructions.zc";
+
+struct Nes {
+    bus: CpuBus*;   // On the heap so nes can move
+    cpu: Cpu6502;
+    systemClockCounter: u64;    // master clock: the PPU ticks on every one, the CPU on every 3rd.
+    dmaCyclesLeft: u16;         // CPU cycles an OAM DMA still keeps the CPU halted
+    finished: bool;
+    paused: bool;
+}
+
+impl Nes {
+    fn create(cartridge: GamePak*) -> Nes {
+
+        let bus = (CpuBus*)calloc(1, sizeof(CpuBus));
+        *bus = CpuBus::create(cartridge);
+
+        return Nes{
+            bus: bus,
+            cpu: Cpu6502::create(bus),
+        };
+    }
+
+    fn start(self){
+        self.systemClockCounter = 0;
+        self.cpu.reset();
+    }
+
+    fn stop(self) {
+        self.finished = true;
+    }
+
+    fn isFinished(self) -> bool {   return self.finished; }
+    fn isPaused(self) -> bool { return self.paused; }
+
+    // The buttons pressed on controller 1 or 2, one bit each (CONTROLLER_A...)
+    fn updateController(self, controller: u8, state: u8) {
+        self.bus.controllers[controller - 1].buttons = state;
+    }
+
+    // Runs the emulation for one frame of the screen
+    fn tickTillFrameComplete(self) {
+        while !self.bus.ppu.takeFrameComplete() {
+            self.tick();
+        }
+    }
+
+    fn pausedTick(self) {
+        /*
+        if (self.Debugger().shouldPauseEmulation()) {
+            return
+        }
+        */
+        let waitForOperationCompletion = false;
+        let initialCompleteStatus = self.cpu.isComplete();
+        if (initialCompleteStatus == false) {
+            waitForOperationCompletion = true;
+        }
+
+        loop {
+            self.tick();
+            if (!waitForOperationCompletion) {
+                if (self.cpu.isComplete() != initialCompleteStatus) {
+                    waitForOperationCompletion = true;
+                }
+            } else {
+                if (self.cpu.isComplete()) {
+                    break;
+                }
+            }
+        }
+    }
+
+    // One cycle of the master clock: a PPU dot, and a CPU cycle on every 3rd
+    fn tick(self){
+        self.bus.ppu.tick();
+        if (self.systemClockCounter % 3 == 0) {
+            if (self.dmaCyclesLeft > 0) {
+                self.dmaCyclesLeft -= 1;   // halted: the DMA has the bus
+            } else {
+                self.cpu.tick();
+                if (self.bus.takeDmaRequest()) {
+                    // 1 halt cycle, 256 reads and 256 writes, and 1 more to
+                    // line up when it starts on an odd CPU cycle. cpu.cycle
+                    // already counts the whole store, so it is where the DMA starts
+                    let dmaCycles: u16 = 513 + (u16)(self.cpu.cycle % 2);
+                    self.dmaCyclesLeft = dmaCycles;
+                    self.cpu.cycle += (u32)dmaCycles;   // the CPU's cycle count includes the halt
+                }
+            }
+        }
+        if (self.bus.ppu.takeNmi()) {
+            self.cpu.nmiPending = true;
+        }
+        self.systemClockCounter += 1;
+    }
+
+    fn frame(self) -> Frame* {
+        return &self.bus.ppu.frame;
+    }
+}
+
+impl Drop for Nes {
+    fn drop(self) {
+        free(self.bus);
+    }
+}

@@ -1,0 +1,126 @@
+import "../src/gamepak/gamepak.zc";
+
+// Header with only flags6 and flags7 set: what most of the flags6 tests need
+fn headerWithFlags(flags6: byte, flags7: byte = 0) -> InesHeader {
+    return InesHeader::create(1, 1, flags6, flags7, 0, 0, 0);
+}
+
+// iNES header, flags6:
+// bit 0 mirroring (0 horizontal, 1 vertical), bit 1 battery, bit 2 trainer,
+// bit 3 four-screen VRAM, bits 4-7 low nibble of the mapper number
+
+test "mirroring comes from bit 0 of flags6" {
+    assert(headerWithFlags(0b00000000).Mirroring() == HORIZONTAL_MIRRORING, "horizontal");
+    assert(headerWithFlags(0b00000001).Mirroring() == VERTICAL_MIRRORING, "vertical");
+}
+
+test "the battery bit does not change the mirroring" {
+    // Bit 1 set: the old code read flags6 & 0b11 and returned 2 or 3 here
+    assert(headerWithFlags(0b00000010).Mirroring() == HORIZONTAL_MIRRORING, "horizontal with battery");
+    assert(headerWithFlags(0b00000011).Mirroring() == VERTICAL_MIRRORING, "vertical with battery");
+}
+
+test "bit 3 of flags6 asks for four screens, whatever bit 0 says" {
+    assert(headerWithFlags(0b00001000).IgnoreMirroringControl(), "bit 3 set");
+    assert(headerWithFlags(0b00001000).Mirroring() == FOUR_SCREEN_MIRRORING, "four screens over horizontal");
+    assert(headerWithFlags(0b00001001).Mirroring() == FOUR_SCREEN_MIRRORING, "four screens over vertical");
+    assert(!headerWithFlags(0b00000111).IgnoreMirroringControl(), "the other bits do not set it");
+}
+
+test "battery-backed RAM is bit 1 of flags6" {
+    assert(headerWithFlags(0b00000010).HasPersistentMemory(), "bit 1");
+    assert(!headerWithFlags(0b00000100).HasPersistentMemory(), "bit 2 is the trainer");
+    assert(!headerWithFlags(0b11111101).HasPersistentMemory(), "every other bit");
+}
+
+test "the trainer is bit 2 of flags6" {
+    assert(headerWithFlags(0b00000100).HasTrainer(), "bit 2 alone");
+    assert(!headerWithFlags(0b00000010).HasTrainer(), "bit 1 is the battery");
+    assert(!headerWithFlags(0b11111011).HasTrainer(), "every other bit");
+}
+
+test "the mapper number joins the high nibbles of flags6 and flags7" {
+    assert(headerWithFlags(0x00, 0x00).MapperNumber() == 0, "NROM");
+    assert(headerWithFlags(0x10, 0x00).MapperNumber() == 1, "MMC1: low nibble from flags6");
+    assert(headerWithFlags(0x40, 0x00).MapperNumber() == 4, "MMC3");
+    assert(headerWithFlags(0x20, 0x40).MapperNumber() == 0x42, "high nibble from flags7");
+    assert(headerWithFlags(0x0F, 0x0F).MapperNumber() == 0, "the low nibbles are other flags");
+}
+
+test "PRG RAM size is flags8, and 0 means one 8 KB bank" {
+    assert(InesHeader::create(1, 1, 0, 0, 0, 0, 0).PRGRAM() == 1, "0 means 1");
+    assert(InesHeader::create(1, 1, 0, 0, 4, 0, 0).PRGRAM() == 4, "4 banks");
+}
+
+test "CHR RAM is used when the header has no CHR ROM banks" {
+    assert(InesHeader::create(1, 0, 0, 0, 0, 0, 0).chrIsRAM(), "0 banks");
+    assert(!InesHeader::create(1, 1, 0, 0, 0, 0, 0).chrIsRAM(), "1 bank");
+}
+
+// Mapper 0 (NROM): no bank switching
+
+test "NROM with 16 KB of PRG mirrors it at 0xC000" {
+    let prg: byte[0x4000];
+    let chr: byte[0x2000];
+    prg[0x0000] = 0x11;
+    prg[0x3FFF] = 0x22;
+    let mapper = createMapper(InesHeader::create(1, 1, 0, 0, 0, 0, 0), prg[0..0x4000], chr[0..0x2000]);
+
+    assert(mapper.readPrgROM(0x8000) == 0x11, "first byte at 0x8000");
+    assert(mapper.readPrgROM(0xBFFF) == 0x22, "last byte at 0xBFFF");
+    assert(mapper.readPrgROM(0xC000) == 0x11, "0xC000 mirrors 0x8000");
+    assert(mapper.readPrgROM(0xFFFF) == 0x22, "0xFFFF mirrors 0xBFFF");
+}
+
+test "NROM with 32 KB of PRG maps it whole" {
+    let prg: byte[0x8000];
+    let chr: byte[0x2000];
+    prg[0x0000] = 0x11;
+    prg[0x4000] = 0x33;
+    prg[0x7FFF] = 0x44;
+    let mapper = createMapper(InesHeader::create(2, 1, 0, 0, 0, 0, 0), prg[0..0x8000], chr[0..0x2000]);
+
+    assert(mapper.readPrgROM(0x8000) == 0x11, "first bank");
+    assert(mapper.readPrgROM(0xC000) == 0x33, "second bank, not a mirror");
+    assert(mapper.readPrgROM(0xFFFF) == 0x44, "last byte");
+}
+
+test "NROM ignores writes to PRG ROM" {
+    let prg: byte[0x4000];
+    let chr: byte[0x2000];
+    prg[0x0000] = 0x11;
+    let mapper = createMapper(InesHeader::create(1, 1, 0, 0, 0, 0, 0), prg[0..0x4000], chr[0..0x2000]);
+
+    mapper.writePrgROM(0x8000, 0x99);
+    assert(mapper.readPrgROM(0x8000) == 0x11, "PRG unchanged");
+}
+
+test "NROM writes CHR only when it is RAM" {
+    let prg: byte[0x4000];
+    let chrROM: byte[0x2000];
+    let chrRAM: byte[0x2000];
+    chrROM[0x0010] = 0x55;
+    let withROM = createMapper(InesHeader::create(1, 1, 0, 0, 0, 0, 0), prg[0..0x4000], chrROM[0..0x2000]);
+    let withRAM = createMapper(InesHeader::create(1, 0, 0, 0, 0, 0, 0), prg[0..0x4000], chrRAM[0..0x2000]);
+
+    withROM.writeChrROM(0x0010, 0x99);
+    assert(withROM.readChrROM(0x0010) == 0x55, "CHR ROM unchanged");
+
+    withRAM.writeChrROM(0x0010, 0x99);
+    assert(withRAM.readChrROM(0x0010) == 0x99, "CHR RAM written");
+}
+
+// Loading a ROM file
+
+test "nestest.nes loads as NROM with 16 KB of PRG and 8 KB of CHR" {
+    let pak = GamePak::createFromFilePath("tests/roms/nestest/nestest.nes");
+
+    assert(pak.header.ProgramSize() == 1, "1 PRG bank");
+    assert(pak.header.CHRSize() == 1, "1 CHR bank");
+    assert(pak.header.MapperNumber() == 0, "mapper 0");
+    assert(pak.chrROM.length() == 0x2000, "8 KB of CHR");
+    // nestest's automated mode starts at 0xC000 with JMP $C5F5 (nestest.log, first line)
+    assert(pak.mapper.readPrgROM(0xC000) == 0x4C, "JMP");
+    assert(pak.mapper.readPrgROM(0xC001) == 0xF5, "low byte of the target");
+    assert(pak.mapper.readPrgROM(0xC002) == 0xC5, "high byte of the target");
+}

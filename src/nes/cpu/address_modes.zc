@@ -1,0 +1,182 @@
+import "./cpu6502.zc";
+
+
+impl Cpu6502 {
+    fn evaluateOperandAddress(self, mode: AddressMode, pc: Address) -> EvaluatedAddress {
+        match mode {
+            AddressMode::Implicit => { return self.evalImplicit(pc); },
+            AddressMode::Immediate => { return self.evalImmediate(pc); },
+            AddressMode::ZeroPage => { return self.evalZeroPage(pc); },
+            AddressMode::ZeroPageX => { return self.evalZeroPageX(pc); },
+            AddressMode::ZeroPageY => { return self.evalZeroPageY(pc); },
+            AddressMode::Absolute => { return self.evalAbsolute(pc); },
+            AddressMode::AbsoluteXIndexed => { return self.evalAbsoluteXIndexed(pc); },
+            AddressMode::AbsoluteYIndexed => { return self.evalAbsoluteYIndexed(pc); },
+            AddressMode::Indirect => { return self.evalIndirect(pc); },
+            AddressMode::IndirectX => { return self.evalIndirectX(pc); },
+            AddressMode::IndirectY => { return self.evalIndirectY(pc); },
+            AddressMode::Relative => { return self.evalRelative(pc); },
+        }
+    }
+
+    fn evalImplicit(self, _: Address) -> EvaluatedAddress {
+        return EvaluatedAddress{
+            address: 0, 
+            cycles: 0,
+        };
+    }
+
+    fn evalImmediate(self, programCounter: Address) -> EvaluatedAddress {
+        return EvaluatedAddress{
+            address: programCounter,
+            cycles: 0,
+            opcodeOperand: [self.memory.read(programCounter), 0, 0],
+        };
+    }
+
+    fn evalZeroPage(self, programCounter: Address) -> EvaluatedAddress {
+        let low: byte = self.memory.read(programCounter);
+        
+        return EvaluatedAddress{
+            address: (Address)low,
+            opcodeOperand: [low,0,0],
+        };
+    }
+
+    fn evalZeroPageX(self, programCounter: Address) -> EvaluatedAddress {
+        let operand: byte = self.memory.read(programCounter);
+        let low: byte = operand + self.registers.X; // Wraps inside page zero
+
+        return EvaluatedAddress{
+            address: (Address)low,
+            opcodeOperand: [operand, 0, 0],
+        };
+    }
+
+    fn evalZeroPageY(self, programCounter: Address) -> EvaluatedAddress 
+    {
+        let operand: byte = self.memory.read(programCounter);
+        let low: byte = operand + self.registers.Y; // Wraps inside page zero
+
+        return EvaluatedAddress{
+            address: (Address)low,
+            opcodeOperand: [operand, 0, 0],
+        };
+    }
+
+    fn evalAbsolute(self, programCounter: Address) -> EvaluatedAddress 
+    {
+        let low: byte = self.memory.read(programCounter);
+        programCounter+= 1;
+
+        let high: byte = self.memory.read(programCounter);
+
+        return EvaluatedAddress{
+            address: Address::from(high, low),
+            opcodeOperand: [low, high, 0],
+        };
+    }
+
+    fn evalAbsoluteXIndexed(self, programCounter: Address) -> EvaluatedAddress
+    {
+        let low: byte = self.memory.read(programCounter);
+        let high: byte = self.memory.read(programCounter+1);
+        let address: Address = Address::from(high, low) + (Address)self.registers.X;
+
+        return EvaluatedAddress{
+            address: address,
+            opcodeOperand: [low, high, 0],
+            pageCrossed: memoryPageDiffer(address - (Address)self.registers.X, address),
+        };
+    }
+
+    fn evalAbsoluteYIndexed(self, programCounter: Address) -> EvaluatedAddress
+    {
+        let low: byte = self.memory.read(programCounter);
+        let high: byte = self.memory.read(programCounter+1);
+        let address: Address = Address::from(high, low) + (Address)self.registers.Y;
+
+        return EvaluatedAddress{
+            address: address,
+            opcodeOperand: [low, high, 0],
+            pageCrossed: memoryPageDiffer(address - (Address)self.registers.Y, address),
+        };
+    }
+
+    // Address Mode: Indirect
+    // The supplied 16-bit address is read to get the actual 16-bit address.
+    // This is Instruction is unusual in that it has a bug in the hardware! To emulate its
+    // function accurately, we also need to emulate this bug. If the low byte of the
+    // supplied address is 0xFF, then to read the high byte of the actual address
+    // we need to cross a page boundary. This doesnt actually work on the chip as
+    // designed, instead it wraps back around in the same page, yielding an
+    // invalid actual address
+    // Example: supplied address is (0x1FF), LSB will be 0x00 and MSB will be 0x01 instead of 0x02.
+
+    // If the 16-bit argument of an Indirect JMP is located between 2 pages (0x01FF and 0x0200 for example),
+    // then the LSB will be read from 0x01FF and the MSB will be read from 0x0100.
+    // This is an actual hardware bug in early revisions of the 6502 which happen to be present
+    // in the 2A03 used by the NES.
+    fn evalIndirect(self, programCounter: Address) -> EvaluatedAddress
+    {
+        // Get Pointer types.Address
+        let ptrLow: byte = self.memory.read(programCounter);
+        let ptrHigh: byte = self.memory.read(programCounter + 1);
+
+        let ptrAddress: Address = Address::from(ptrHigh, ptrLow);
+        let address: Address = self.read16Bugged(ptrAddress);
+        
+        return EvaluatedAddress{
+            address: address,
+            opcodeOperand: [ptrLow, ptrHigh, 0],
+        };
+    }
+
+
+    fn evalIndirectX(self, programCounter: Address) -> EvaluatedAddress {
+        let operand : byte = self.memory.read(programCounter);
+        let pointer: byte = operand + self.registers.X; // Wraps inside page zero
+
+        let effectiveLow :byte = self.memory.read((Address)pointer);
+        let effectiveHigh :byte = self.memory.read((Address)(pointer + 1) & 0x00FF); // automatic warp around
+
+        let address = Address::from(effectiveHigh, effectiveLow);
+
+        return EvaluatedAddress{
+            address: address,
+            opcodeOperand: [operand, 0, 0],
+        };
+    }
+
+    fn evalIndirectY(self, programCounter: Address) -> EvaluatedAddress {
+        let operand :byte = self.memory.read(programCounter);
+
+        let lo :byte = self.memory.read((Address)operand);
+        let hi :byte = self.memory.read((Address)(operand + 1) & 0x00FF); // automatic warp around
+
+        let address = Address::from(hi, lo);
+        address += (Word)self.registers.Y;
+
+        return EvaluatedAddress{
+            address: address,
+            pageCrossed: address&0xFF00 != ((Address)hi)<<8,
+            opcodeOperand: [operand, 0, 0],
+        };
+    }
+
+    fn evalRelative(self, programCounter: Address) -> EvaluatedAddress {
+        let operand : byte= self.memory.read(programCounter);
+
+        let address: Address = programCounter + 1;
+        if (operand < 0x80) {
+            address += (Address)operand;
+        } else {
+            address += ((Address)operand) - 0x100;
+        }
+
+        return EvaluatedAddress{
+            address: address,
+            opcodeOperand: [operand, 0 ,0]
+        };
+    }
+}

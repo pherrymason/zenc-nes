@@ -1,0 +1,119 @@
+import "../../types.zc";
+
+// Bit position of each flag inside Status (NV-BDIZC)
+enum StatusFlag {
+    Carry = 0,
+    Zero,
+    Interrupt,
+    Decimal,
+    BreakCommand,
+    Unused,
+    Overflow,
+    Negative,
+}
+
+// Where the CPU reads the address of the first instruction on power on and reset
+def RESET_VECTOR_ADDRESS: Address = 0xFFFC;
+
+@derive(Copy)
+struct Registers {
+    A: byte;        // accumulator
+    X: byte;        // index X
+    Y: byte;        // index Y
+    Pc: Address;    // program counter
+    Sp: byte;       // stack pointer: offset in page 0x0100
+    Status: byte;   // NV-BDIZC
+}
+
+impl Registers {
+    fn create() -> Registers {
+        return Registers {
+            A: 0x00,
+            X: 0x00,
+            Y: 0x00,
+            Pc: RESET_VECTOR_ADDRESS,
+            Sp: 0xFF,
+            Status: 0x20,
+        };
+    }
+
+    // State after power on or reset: 3 fake pushes leave Sp at 0xFD
+    // and interrupts start disabled (I = 1)
+    fn reset(self) {
+        self.A = 0x00;
+        self.X = 0x00;
+        self.Y = 0x00;
+        self.Sp = 0xFD;
+        self.Pc = RESET_VECTOR_ADDRESS;
+        self.Status = 0x24;
+    }
+
+    // Returns 1 if the flag is set, 0 otherwise
+    fn flag(self, flag: StatusFlag) -> byte {
+        return (self.Status >> (int)flag) & 0x01;
+    }
+
+    fn setFlag(self, flag: StatusFlag, set: bool) {
+        let mask: byte = (byte)(1 << (int)flag);
+        if set {
+            self.Status |= mask;
+        } else {
+            self.Status &= ~mask;
+        }
+    }
+
+    fn carryFlag(self) -> byte { return self.flag(StatusFlag::Carry); }
+    fn zeroFlag(self) -> byte { return self.flag(StatusFlag::Zero); }
+    fn interruptFlag(self) -> byte { return self.flag(StatusFlag::Interrupt); }
+    fn decimalFlag(self) -> byte { return self.flag(StatusFlag::Decimal); }
+    fn breakFlag(self) -> byte { return self.flag(StatusFlag::BreakCommand); }
+    fn overflowFlag(self) -> byte { return self.flag(StatusFlag::Overflow); }
+    fn negativeFlag(self) -> byte { return self.flag(StatusFlag::Negative); }
+
+    fn setCarryFlag(self, set: bool) { self.setFlag(StatusFlag::Carry, set); }
+    fn setZeroFlag(self, set: bool) { self.setFlag(StatusFlag::Zero, set); }
+    fn setInterruptFlag(self, set: bool) { self.setFlag(StatusFlag::Interrupt, set); }
+    fn setDecimalFlag(self, set: bool) { self.setFlag(StatusFlag::Decimal, set); }
+    fn setOverflowFlag(self, set: bool) { self.setFlag(StatusFlag::Overflow, set); }
+    fn setNegativeFlag(self, set: bool) { self.setFlag(StatusFlag::Negative, set); }
+
+    // N takes bit 7 of the value
+    fn updateNegativeFlag(self, value: byte) {
+        self.setNegativeFlag((value & 0x80) == 0x80);
+    }
+
+    // Z is set when the value is zero
+    fn updateZeroFlag(self, value: byte) {
+        self.setZeroFlag(value == 0x00);
+    }
+
+    // Most instructions that leave a result set N and Z from it
+    fn updateNegativeAndZeroFlags(self, value: byte) {
+        self.updateNegativeFlag(value);
+        self.updateZeroFlag(value);
+    }
+
+    // Bit 5 does not exist on the chip and always reads as 1
+    fn statusRegister(self) -> byte {
+        return self.Status | 0x20;
+    }
+
+    // PLP and RTI: bit 4 (Break) is discarded and bit 5 stays set
+    fn loadStatusRegisterIgnoring5and4(self, value: byte) {
+        self.Status = (value | 0x20) & 0xEF;
+    }
+
+    // The stack lives in page 1: 0x0100 + Sp
+    fn stackPointerAddress(self) -> Address {
+        return 0x0100 + (Address)self.Sp;
+    }
+
+    // Sp is a byte: it wraps from 0x00 to 0xFF on its own
+    fn stackPointerPushed(self) {
+        self.Sp -= 1;
+    }
+
+    fn stackPointerPopped(self) {
+        self.Sp += 1;
+    }
+}

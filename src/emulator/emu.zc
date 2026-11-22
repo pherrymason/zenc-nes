@@ -1,0 +1,110 @@
+import "raylib.h" as rl;
+import "./options.zc";
+import "../gamepak/gamepak.zc";
+import "../nes/nes.zc";
+
+def SCREEN_PADDING = 20;   // margin around the NES picture, in window pixels
+
+fn run(options: Options) {
+    let scale = options.videoScale;
+    if (scale < 1) {
+        scale = 1;
+    }
+
+    // The window fits the scaled picture and its margin
+    let windowWidth: i32 = SCREEN_WIDTH * scale + 2 * SCREEN_PADDING;
+    let windowHeight: i32 = SCREEN_HEIGHT * scale + 2 * SCREEN_PADDING;
+    if (options.debugPPU) {
+        windowWidth += 400;
+    }
+
+    rl::InitWindow(windowWidth, windowHeight, "Zen-Nes");
+    defer rl::CloseWindow();
+
+    let blank = rl::GenImageColor(SCREEN_WIDTH, SCREEN_HEIGHT, rl::BLACK);
+    let screen = rl::LoadTextureFromImage(blank);
+    defer rl::UnloadTexture(screen);
+
+    rl::SetTraceLogLevel(rl::LOG_WARNING);
+    rl::SetTargetFPS(60);   // one NES frame per window frame: the NTSC NES draws 60 per second
+
+    let cartridge = GamePak::createFromFilePath(options.romPath);
+    let console = Nes::create(
+        &cartridge
+
+    );
+
+    _run(&console, screen, scale);
+}
+
+fn _run(console: Nes*, screen: rl::Texture2D, scale: int) {
+    console.start();
+    let prevTime = rl::GetTime();
+
+    while (rl::WindowShouldClose() == false) {
+        if (console.isFinished()) {
+            break;
+        }
+
+        let now = rl::GetTime();
+        let dt = now - prevTime;
+        prevTime = now;
+        if (dt > 1) {
+            // difference is too big
+            dt = 0;
+        }
+
+        // update controllers
+        let controllerState = readController();
+        console.updateController(1, controllerState);
+
+        if (!console.isPaused()) {
+            console.tickTillFrameComplete();
+        } else {
+            console.pausedTick();
+        }
+
+        // Drawing
+        updateScreen(console, screen, scale);
+    }
+
+    console.stop();
+}
+
+
+fn updateScreen(console: Nes*, screen: rl::Texture2D, scale: int) {
+    rl::BeginDrawing();
+    rl::ClearBackground(rl::BLACK);
+    
+    renderEmulation(screen, console.frame(), scale);
+
+    rl::EndDrawing();
+}
+
+fn renderEmulation(screen: rl::Texture2D, frame: Frame*, scale: int) {
+    rl::UpdateTexture(screen, (void*)&frame.pixels[0]);
+    let padding: f32 = (f32)SCREEN_PADDING;
+    // A 1 pixel frame around the picture
+    rl::DrawRectangle(SCREEN_PADDING - 1, SCREEN_PADDING - 1, SCREEN_WIDTH * scale + 2, SCREEN_HEIGHT * scale + 2, rl::RAYWHITE);
+    rl::DrawTextureEx(
+        screen, 
+        rl::Vector2{x: padding, y: padding},
+        0,
+        (f32)scale,
+        rl::WHITE  
+    );
+}
+
+// The keyboard as controller 1: one bit per button pressed
+fn readController() -> u8 {
+    let state: u8 = 0;
+    if rl::IsKeyDown(rl::KEY_Z) { state |= CONTROLLER_A; }
+    if rl::IsKeyDown(rl::KEY_X) { state |= CONTROLLER_B; }
+    if rl::IsKeyDown(rl::KEY_A) { state |= CONTROLLER_SELECT; }
+    if rl::IsKeyDown(rl::KEY_S) { state |= CONTROLLER_START; }
+    if rl::IsKeyDown(rl::KEY_UP) { state |= CONTROLLER_UP; }
+    if rl::IsKeyDown(rl::KEY_DOWN) { state |= CONTROLLER_DOWN; }
+    if rl::IsKeyDown(rl::KEY_LEFT) { state |= CONTROLLER_LEFT; }
+    if rl::IsKeyDown(rl::KEY_RIGHT) { state |= CONTROLLER_RIGHT; }
+    return state;
+}

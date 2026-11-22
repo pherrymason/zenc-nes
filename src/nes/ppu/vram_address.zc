@@ -1,0 +1,115 @@
+import "../../types.zc";
+
+// The PPU's internal VRAM address registers, v and t: 15 bits.
+//   yyy NN YYYYY XXXXX
+//   ||| || ||||| +++++-- coarse X: tile column (0-31)
+//   ||| || +++++-------- coarse Y: tile row (0-29)
+//   ||| ++-------------- nametable select
+//   +++----------------- fine Y: pixel row inside the tile
+// v is the address the PPU uses now; t is where the next frame (or the
+// second write of PPUADDR) will start, and gets copied into v.
+def VRAM_COARSE_X: u16 = 0x001F;
+def VRAM_COARSE_Y: u16 = 0x03E0;
+def VRAM_NAME_TABLE: u16 = 0x0C00;
+def VRAM_FINE_Y: u16 = 0x7000;
+def VRAM_ADDRESS_BITS: u16 = 0x7FFF;
+
+@derive(Copy)
+struct VramAddress {
+    value: u16;
+}
+
+impl VramAddress {
+    fn setCoarseX(self, coarseX: byte) {
+        self.value = (self.value & ~VRAM_COARSE_X) | ((u16)coarseX & 0x1F);
+    }
+
+    fn setCoarseY(self, coarseY: byte) {
+        self.value = (self.value & ~VRAM_COARSE_Y) | (((u16)coarseY & 0x1F) << 5);
+    }
+
+    fn setNameTable(self, nameTable: byte) {
+        self.value = (self.value & ~VRAM_NAME_TABLE) | (((u16)nameTable & 0x03) << 10);
+    }
+
+    fn setFineY(self, fineY: byte) {
+        self.value = (self.value & ~VRAM_FINE_Y) | (((u16)fineY & 0x07) << 12);
+    }
+
+    // First write of PPUADDR: bits 8-13. Bit 14 is cleared
+    fn setHighByte(self, value: byte) {
+        self.value = (self.value & 0x00FF) | (((u16)value & 0x3F) << 8);
+    }
+
+    // Second write of PPUADDR: bits 0-7
+    fn setLowByte(self, value: byte) {
+        self.value = (self.value & 0xFF00) | (u16)value;
+    }
+
+    // After each PPUDATA access: 1 goes across, 32 goes down a row of tiles
+    fn increment(self, step: u16) {
+        self.value = (self.value + step) & VRAM_ADDRESS_BITS;
+    }
+
+    fn coarseX(self) -> byte { return (byte)(self.value & VRAM_COARSE_X); }
+    fn coarseY(self) -> byte { return (byte)((self.value & VRAM_COARSE_Y) >> 5); }
+    fn fineY(self) -> byte { return (byte)((self.value & VRAM_FINE_Y) >> 12); }
+
+    // --- Rendering: how the PPU walks v while it draws (nesdev "PPU scrolling") ---
+
+    // The nametable byte of the tile v points at: the tile id
+    fn tileAddress(self) -> Address {
+        return (Address)(0x2000 | (self.value & 0x0FFF));
+    }
+
+    // The attribute byte of that tile: one byte per 4x4 tiles, at the end of
+    // its nametable (0x23C0)
+    fn attributeAddress(self) -> Address {
+        return (Address)(0x23C0 | (self.value & VRAM_NAME_TABLE) | ((self.value >> 4) & 0x38) | ((self.value >> 2) & 0x07));
+    }
+
+    // Next tile to the right; past column 31 it goes on in the next
+    // nametable to the side
+    fn incrementCoarseX(self) {
+        if (self.value & VRAM_COARSE_X) == 31 {
+            self.value &= ~VRAM_COARSE_X;
+            self.value ^= 0x0400;
+        } else {
+            self.value += 1;
+        }
+    }
+
+    // Next pixel row; after the 8 rows of a tile, the next row of tiles.
+    // Past row 29 (the last one of a nametable) it goes on in the nametable
+    // below; rows 30 and 31 are the attributes, so row 31 wraps to 0 without
+    // switching nametable
+    fn incrementY(self) {
+        if (self.value & VRAM_FINE_Y) != VRAM_FINE_Y {
+            self.value += 0x1000;
+            return;
+        }
+        self.value &= ~VRAM_FINE_Y;
+        let coarseY = self.coarseY();
+        if coarseY == 29 {
+            coarseY = 0;
+            self.value ^= 0x0800;
+        } else if coarseY == 31 {
+            coarseY = 0;
+        } else {
+            coarseY += 1;
+        }
+        self.setCoarseY(coarseY);
+    }
+
+    // At the end of each scanline: back to the left edge of the scroll
+    fn copyHorizontal(self, from: VramAddress) {
+        let bits: u16 = VRAM_COARSE_X | 0x0400;
+        self.value = (self.value & ~bits) | (from.value & bits);
+    }
+
+    // During the pre-render scanline: back to the top edge of the scroll
+    fn copyVertical(self, from: VramAddress) {
+        let bits: u16 = VRAM_FINE_Y | 0x0800 | VRAM_COARSE_Y;
+        self.value = (self.value & ~bits) | (from.value & bits);
+    }
+}

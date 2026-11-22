@@ -1,0 +1,32 @@
+//> pkg-config: raylib
+
+import "./flags.zc"
+import "./emulator/options.zc";
+import "./emulator/emu.zc";
+
+fn main(argc: int, argv: char**) {
+    let options = readArguments(argc, argv);
+    
+    println(f"rom={options.romPath} scale={options.videoScale} logCPU={options.logCPU} debugPPU={options.debugPPU} breakpoint={options.breakpoint} cpuProfile={options.cpuProfile}");
+
+    if options.romPath == NULL || strlen(options.romPath) == 0 {
+        eprintln("usage: zen-nes -rom <file.nes> [-scale N]");
+        exit(1);
+    }
+
+    run(options);
+}
+
+fn readArguments(argc: int, argv: char**) -> Options {
+    let options = Options {};
+    let flags = FlagSet::new("zen-nes");
+    flags.bool_var(&options.cpuProfile, "cpuprofile", false, "write cpu profile to file");
+    flags.string_var(&options.romPath, "rom", "", "path to rom");
+    flags.bool_var(&options.logCPU, "logCPU", false, "enables CPU log");
+    flags.bool_var(&options.debugPPU, "debugPPU", false, "Displays PPU debug information");
+    flags.int_var(&options.videoScale, "scale", 1, "scale resolution");
+    flags.string_var(&options.breakpoint, "breakpoint", "", "defines a breakpoint on start");
+    flags.parse(argc, argv);
+    
+    return options;
+}

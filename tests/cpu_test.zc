@@ -1,0 +1,260 @@
+import "./support/simple_memory.zc";
+import "../src/nes/cpu.zc";
+
+test "push writes at 0x0100 + Sp and moves Sp down" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);    // Sp = 0xFF
+
+    cpu.pushStack(0x20);
+
+    assert(cpu.registers.Sp == 0xFE, "Sp");
+    assert(cpu.memory.read(0x01FF) == 0x20, "value at 0x01FF");
+}
+
+test "push wraps the stack pointer around" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Sp = 0x00;
+
+    cpu.pushStack(0x20);
+    cpu.pushStack(0x21);
+
+    assert(cpu.registers.Sp == 0xFE, "Sp");
+    assert(cpu.memory.read(0x0100) == 0x20, "first push at the bottom of page 1");
+    assert(cpu.memory.read(0x01FF) == 0x21, "second push at the top of page 1");
+}
+
+test "pop returns the values in reverse order and restores Sp" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Sp = 0xFD;
+
+    cpu.pushStack(0x12);
+    cpu.pushStack(0x34);
+
+    assert(cpu.popStack() == 0x34, "last pushed comes out first");
+    assert(cpu.popStack() == 0x12, "then the first one");
+    assert(cpu.registers.Sp == 0xFD, "Sp back where it started");
+}
+
+test "pop wraps the stack pointer around" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.registers.Sp = 0xFF;
+    cpu.memory.write(0x0100, 0x42);
+
+    assert(cpu.popStack() == 0x42, "reads 0x0100 after Sp wraps to 0x00");
+    assert(cpu.registers.Sp == 0x00, "Sp");
+}
+
+test "read16 reads a little endian word" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.memory.write(0x0300, 0x34);  // low
+    cpu.memory.write(0x0301, 0x12);  // high
+
+    assert(cpu.read16(0x0300) == 0x1234, "word");
+}
+
+test "read16 crosses the page, read16Bugged does not" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.memory.write(0x02FF, 0x34);  // low
+    cpu.memory.write(0x0300, 0x12);  // high in the next page
+    cpu.memory.write(0x0200, 0x56);  // high in the same page
+
+    assert(cpu.read16(0x02FF) == 0x1234, "read16 takes the high byte from 0x0300");
+    assert(cpu.read16Bugged(0x02FF) == 0x5634, "read16Bugged takes it from 0x0200");
+}
+
+// reset and tick: small programs in memory
+
+// A CPU whose reset vector points to 0x8000, already reset
+fn cpuAt8000(mem: SimpleMemory*) -> Cpu6502 {
+    let cpu = Cpu6502::create(mem);
+    cpu.memory.write(0xFFFC, 0x00);
+    cpu.memory.write(0xFFFD, 0x80);
+    cpu.reset();
+    return cpu;
+}
+
+// Ticks until the instruction at Pc finishes and returns how many cycles it took
+fn runInstruction(cpu: Cpu6502*) -> int {
+    let cycles = 0;
+    cpu.tick();
+    cycles += 1;
+    while !cpu.isComplete() {
+        cpu.tick();
+        cycles += 1;
+    }
+    return cycles;
+}
+
+test "reset jumps to the address at the reset vector" {
+    let mem = SimpleMemory{};
+    let cpu = Cpu6502::create(&mem);
+    cpu.memory.write(0xFFFC, 0x34);
+    cpu.memory.write(0xFFFD, 0x12);
+    cpu.registers.A = 0x55;
+
+    cpu.reset();
+
+    assert(cpu.registers.Pc == 0x1234, "Pc from the vector");
+    assert(cpu.registers.A == 0x00, "registers reset");
+    assert(cpu.registers.Sp == 0xFD, "Sp");
+    assert(cpu.registers.Status == 0x24, "Status");
+    assert(cpu.cycle == 7, "reset takes 7 cycles");
+    assert(cpu.isComplete(), "ready for the first instruction");
+}
+
+test "an instruction runs on its first tick and then counts its cycles down" {
+    let mem = SimpleMemory{};
+    let cpu = cpuAt8000(&mem);
+    cpu.memory.write(0x8000, 0xA9);   // LDA #$42
+    cpu.memory.write(0x8001, 0x42);
+
+    cpu.tick();
+    assert(cpu.registers.A == 0x42, "already loaded");
+    assert(cpu.registers.Pc == 0x8002, "Pc on the next instruction");
+    assert(!cpu.isComplete(), "one cycle left");
+
+    cpu.tick();
+    assert(cpu.isComplete(), "done after 2 cycles");
+    assert(cpu.cycle == 7 + 2, "cycle counter");
+}
+
+test "LDA then STA copies a value to memory" {
+    let mem = SimpleMemory{};
+    let cpu = cpuAt8000(&mem);
+    cpu.memory.write(0x8000, 0xA9);   // LDA #$42
+    cpu.memory.write(0x8001, 0x42);
+    cpu.memory.write(0x8002, 0x85);   // STA $10
+    cpu.memory.write(0x8003, 0x10);
+
+    assert(runInstruction(&cpu) == 2, "LDA # takes 2 cycles");
+    assert(runInstruction(&cpu) == 3, "STA zp takes 3 cycles");
+    assert(cpu.memory.read(0x0010) == 0x42, "stored");
+    assert(cpu.registers.Pc == 0x8004, "Pc");
+    assert(cpu.cycle == 7 + 5, "cycle counter");
+}
+
+test "a load crossing a page takes 1 cycle more, a store does not" {
+    let mem = SimpleMemory{};
+    let cpu = cpuAt8000(&mem);
+    cpu.registers.X = 0x01;
+    cpu.memory.write(0x8000, 0xBD);   // LDA $02FF,X -> reads 0x0300
+    cpu.memory.write(0x8001, 0xFF);
+    cpu.memory.write(0x8002, 0x02);
+    cpu.memory.write(0x8003, 0xBD);   // LDA $0200,X -> same page
+    cpu.memory.write(0x8004, 0x00);
+    cpu.memory.write(0x8005, 0x02);
+    cpu.memory.write(0x8006, 0x9D);   // STA $02FF,X -> crosses, fixed 5 cycles
+    cpu.memory.write(0x8007, 0xFF);
+    cpu.memory.write(0x8008, 0x02);
+    cpu.memory.write(0x0300, 0x77);
+
+    assert(runInstruction(&cpu) == 5, "LDA abs,X crossing a page");
+    assert(cpu.registers.A == 0x77, "read from the next page");
+    assert(runInstruction(&cpu) == 4, "LDA abs,X in the same page");
+    assert(runInstruction(&cpu) == 5, "STA abs,X always 5");
+}
+
+test "a branch takes 2 cycles, 3 if taken and 4 if taken to another page" {
+    let mem = SimpleMemory{};
+    let cpu = cpuAt8000(&mem);
+    cpu.memory.write(0x8000, 0xB0);   // BCS +2: not taken (C = 0)
+    cpu.memory.write(0x8001, 0x02);
+    cpu.memory.write(0x8002, 0x90);   // BCC +2: taken, to 0x8006
+    cpu.memory.write(0x8003, 0x02);
+    cpu.memory.write(0x8006, 0x90);   // BCC +0x7F: taken, to 0x8087
+    cpu.memory.write(0x8007, 0x7F);
+
+    assert(runInstruction(&cpu) == 2, "not taken");
+    assert(cpu.registers.Pc == 0x8002, "falls through");
+    assert(runInstruction(&cpu) == 3, "taken, same page");
+    assert(cpu.registers.Pc == 0x8006, "jumped");
+    assert(runInstruction(&cpu) == 3, "taken, 0x8008 and 0x8087 share the page");
+    assert(cpu.registers.Pc == 0x8087, "jumped forward");
+
+    cpu.registers.Pc = 0x80F0;
+    cpu.memory.write(0x80F0, 0x90);   // BCC +0x20: from 0x80F2 to 0x8112
+    cpu.memory.write(0x80F1, 0x20);
+    assert(runInstruction(&cpu) == 4, "taken, another page");
+    assert(cpu.registers.Pc == 0x8112, "jumped to the next page");
+}
+
+test "a DEX/BNE loop runs until X is zero" {
+    let mem = SimpleMemory{};
+    let cpu = cpuAt8000(&mem);
+    cpu.memory.write(0x8000, 0xA2);   // LDX #$03
+    cpu.memory.write(0x8001, 0x03);
+    cpu.memory.write(0x8002, 0xCA);   // loop: DEX
+    cpu.memory.write(0x8003, 0xD0);   // BNE loop (-3)
+    cpu.memory.write(0x8004, 0xFD);
+
+    let cycles = 0;
+    while cpu.registers.Pc != 0x8005 {
+        cycles += runInstruction(&cpu);
+    }
+
+    assert(cpu.registers.X == 0x00, "X");
+    // LDX 2 + twice (DEX 2 + BNE taken 3) + DEX 2 + BNE not taken 2
+    assert(cycles == 16, "cycles");
+}
+
+test "JSR and RTS call a subroutine and come back" {
+    let mem = SimpleMemory{};
+    let cpu = cpuAt8000(&mem);
+    cpu.memory.write(0x8000, 0x20);   // JSR $8010
+    cpu.memory.write(0x8001, 0x10);
+    cpu.memory.write(0x8002, 0x80);
+    cpu.memory.write(0x8010, 0xE8);   // INX
+    cpu.memory.write(0x8011, 0x60);   // RTS
+
+    assert(runInstruction(&cpu) == 6, "JSR");
+    assert(cpu.registers.Pc == 0x8010, "in the subroutine");
+    assert(runInstruction(&cpu) == 2, "INX");
+    assert(runInstruction(&cpu) == 6, "RTS");
+    assert(cpu.registers.Pc == 0x8003, "after the JSR");
+    assert(cpu.registers.X == 0x01, "the subroutine ran");
+    assert(cpu.registers.Sp == 0xFD, "stack as it was");
+}
+
+test "JMP indirect reads its target with the page bug" {
+    let mem = SimpleMemory{};
+    let cpu = cpuAt8000(&mem);
+    cpu.memory.write(0x8000, 0x6C);   // JMP ($02FF)
+    cpu.memory.write(0x8001, 0xFF);
+    cpu.memory.write(0x8002, 0x02);
+    cpu.memory.write(0x02FF, 0x34);   // low byte
+    cpu.memory.write(0x0300, 0x12);   // where read16 would take the high byte
+    cpu.memory.write(0x0200, 0x56);   // where the 6502 takes it
+
+    assert(runInstruction(&cpu) == 5, "JMP (ind)");
+    assert(cpu.registers.Pc == 0x5634, "high byte from the same page");
+}
+
+test "an NMI waits for the instruction to end and takes 7 cycles" {
+    let mem = SimpleMemory{};
+    let cpu = cpuAt8000(&mem);
+    cpu.memory.write(0xFFFA, 0x00);   // NMI vector: 0x9000
+    cpu.memory.write(0xFFFB, 0x90);
+    cpu.memory.write(0x8000, 0xAD);   // LDA $1234: 4 cycles
+    cpu.memory.write(0x8001, 0x34);
+    cpu.memory.write(0x8002, 0x12);
+
+    cpu.tick();                        // LDA starts
+    cpu.nmiPending = true;             // the PPU asks in the middle of it
+    cpu.tick();
+    cpu.tick();
+    cpu.tick();
+    assert(cpu.isComplete() && cpu.registers.Pc == 0x8003, "LDA finished first");
+
+    let cyclesBefore = cpu.cycle;
+    let statusBefore = cpu.registers.statusRegister();   // Z set by loading 0
+    assert(runInstruction(&cpu) == 7, "the NMI takes 7 cycles");
+    assert(cpu.registers.Pc == 0x9000, "jumped through the NMI vector");
+    assert(cpu.cycle == cyclesBefore + 7, "cycle counter");
+    assert(cpu.popStack() == statusBefore, "pushed the status, with B clear");
+    assert(cpu.popAddress() == 0x8003, "pushed the address of the next instruction");
+}

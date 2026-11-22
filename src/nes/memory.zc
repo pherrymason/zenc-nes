@@ -1,0 +1,6 @@
+import "../types.zc";
+
+trait Memory {
+    fn read(self, address: Address) -> byte;
+    fn write(self, address: Address, value: byte);
+}

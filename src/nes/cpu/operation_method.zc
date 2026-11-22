@@ -1,0 +1,23 @@
+import "../../types.zc"
+
+
+enum AddressMode {
+    Implicit,
+	Immediate,
+	ZeroPage,
+	ZeroPageX,
+	ZeroPageY,
+	Absolute,
+	AbsoluteXIndexed,
+	AbsoluteYIndexed,
+	Indirect,
+	IndirectX,
+	IndirectY,
+	Relative,
+}
+
+// What every instruction receives: how the operand was addressed and where it is
+struct OperationMethodArgument {
+    addressMode: AddressMode;
+    operandAddress: Address;
+}

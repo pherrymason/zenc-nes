@@ -1,0 +1,77 @@
+import "../src/flags.zc"
+
+struct Opts {
+    scale: int;
+    rom: string;
+    log: bool;
+    debug: bool;
+}
+
+fn make_args(a: string, b: string = NULL, c: string = NULL, d: string = NULL, e: string = NULL) -> Vec<string> {
+    let v = Vec<string>::new();
+    v.push(a);
+    if b != NULL { v.push(b); }
+    if c != NULL { v.push(c); }
+    if d != NULL { v.push(d); }
+    if e != NULL { v.push(e); }
+    return v;
+}
+
+fn setup(set: FlagSet*, o: Opts*) {
+    set.int_var(&o.scale, "scale", 1, "scale resolution");
+    set.string_var(&o.rom, "rom", "", "path to rom");
+    set.bool_var(&o.log, "logCPU", false, "enables CPU log");
+    set.bool_var(&o.debug, "debugPPU", false, "debug ppu");
+}
+
+test "defaults when no args" {
+    let o = Opts {};
+    let set = FlagSet::new("t");
+    setup(&set, &o);
+    let args = Vec<string>::new();
+    assert(set.try_parse(&args) == ParseOutcome::Parsed, "parsed");
+    assert(o.scale == 1, "scale default");
+    assert(strcmp(o.rom, "") == 0, "rom default");
+    assert(!o.log, "log default");
+}
+
+test "all syntaxes" {
+    let o = Opts {};
+    let set = FlagSet::new("t");
+    setup(&set, &o);
+    let args = make_args("-scale", "3", "--rom=game.nes", "-logCPU", "-debugPPU=true");
+    assert(set.try_parse(&args) == ParseOutcome::Parsed, "parsed");
+    assert(o.scale == 3, "scale");
+    assert(strcmp(o.rom, "game.nes") == 0, "rom");
+    assert(o.log, "log");
+    assert(o.debug, "debug");
+}
+
+test "positional args stop parsing" {
+    let o = Opts {};
+    let set = FlagSet::new("t");
+    setup(&set, &o);
+    let args = make_args("-logCPU", "--", "-scale", "x");
+    assert(set.try_parse(&args) == ParseOutcome::Parsed, "parsed");
+    assert(set.rest.length() == 2, "rest");
+    assert(strcmp(set.rest.get(0), "-scale") == 0, "rest 0");
+    assert(o.scale == 1, "scale untouched");
+}
+
+test "errors" {
+    let o = Opts {};
+    let set = FlagSet::new("t");
+    setup(&set, &o);
+    let a1 = make_args("-nope=1");
+    assert(set.try_parse(&a1) == ParseOutcome::Failed, "unknown");
+    assert(set.error.eq_str("flag provided but not defined: -nope"), "unknown msg");
+    let a2 = make_args("-scale", "abc");
+    assert(set.try_parse(&a2) == ParseOutcome::Failed, "bad int");
+    let a3 = make_args("-rom");
+    assert(set.try_parse(&a3) == ParseOutcome::Failed, "missing value");
+    assert(set.error.eq_str("flag needs an argument: -rom"), "missing msg");
+    let a4 = make_args("-logCPU=maybe");
+    assert(set.try_parse(&a4) == ParseOutcome::Failed, "bad bool");
+    let a5 = make_args("-help");
+    assert(set.try_parse(&a5) == ParseOutcome::HelpRequested, "help");
+}

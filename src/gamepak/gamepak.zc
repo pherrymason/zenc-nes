@@ -1,0 +1,78 @@
+import "std/io.zc";
+import "std/vec.zc";
+import "std/result.zc";
+import "./mapper.zc";
+import "./header.zc";
+
+
+struct GamePak {
+    header: InesHeader;
+    mapper: AnyMapper;  // owns the mapper
+    rom: Vec<byte>;     // the whole file
+    prgROM: [byte];     // view into rom
+    chrROM: Vec<byte>;  // CHR ROM copied from rom, or zeroed CHR RAM
+}
+
+def PRG_BANK_SIZE = 0x4000;
+def CHR_BANK_SIZE = 0x2000; // 8 KB
+
+impl GamePak {
+    fn createFromFilePath(path: string) -> GamePak {
+        
+        let res = read_file(path);
+        if (res.is_err()) {
+            eprintln(f"File reading error: {res.err}");
+            exit(1);
+        }
+        let data = res.unwrap();        
+
+        let header: const InesHeader = InesHeader::createFromRom(&data);
+
+        let prgEnd: usize = 16 + header.ProgramSize() * PRG_BANK_SIZE;
+        let chrLength: usize = CHR_BANK_SIZE; 
+        
+        if (!header.chrIsRAM() && prgEnd + chrLength > data.length()) {
+            panic(f"ROM truncated: CHR needs {chrLength} bytes after PRG");
+        }
+        
+        let chrROM = Vec<byte>::with_capacity(chrLength);
+        if (header.chrIsRAM()) {
+            mem_zero<byte>(chrROM.data, chrLength);
+        } else {
+            mem_copy<byte>(chrROM.data, data.data + prgEnd, chrLength);
+        }
+        chrROM.len = chrLength; // with_capacity reserves memory but leaves len at 0.
+        let prgROM: [byte] = data.data[16..prgEnd];
+        
+        return GamePak{
+            header: header,
+            mapper: createMapper(header, prgROM, chrROM.data[0..chrLength]),
+            rom: data,
+            prgROM: prgROM,
+            chrROM: chrROM
+        };
+    }
+}
+
+fn read_file(path: string) -> Result<Vec<u8>> {
+    let f = fopen(path, "rb");
+    if f == NULL {
+        return Result<Vec<u8>>::Err("Could not open");
+    }
+    defer fclose(f);                    
+
+    fseek(f, 0, 2);
+    let size = ftell(f);
+    fseek(f, 0, 0);
+    if size <= 0 {
+        return Result<Vec<u8>>::Err("Empty file");
+    }
+
+    let rom = Vec<u8>::with_capacity((usize)size);
+    let got = fread(rom.data, 1, (usize)size, f);
+    if got != size {
+        return Result<Vec<u8>>::Err("Read incomplete");
+    }
+    rom.len = (usize)got;               // data/len/cap son públicos: una sola lectura, sin push
+    return Result<Vec<u8>>::Ok(rom);
+}

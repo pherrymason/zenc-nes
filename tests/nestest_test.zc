@@ -1,0 +1,112 @@
+import "std/io.zc";
+import "std/fs.zc";
+import "../src/nes/cpu_bus.zc";
+import "../src/nes/cpu.zc";
+
+// nestest (https://www.qmtpro.com/~nes/misc/nestest.txt) runs every official 6502
+// instruction when it starts at 0xC000, and nestest.log is the state of a real CPU
+// before each instruction. The first 5003 lines are the official opcodes; from line
+// 5004 on, the unofficial ones, which this emulator does not run.
+def NESTEST_OFFICIAL_LINES = 5003;
+
+// The CPU state on one line of nestest.log:
+// C000  4C F5 C5  JMP $C5F5                       A:00 X:00 Y:00 P:24 SP:FD PPU:  0, 21 CYC:7
+// The columns are fixed: Pc at 0, A at 50, X at 55, Y at 60, P at 65, SP at 71, CYC at 90.
+struct LogState {
+    pc: Address;
+    a: byte;
+    x: byte;
+    y: byte;
+    status: byte;
+    sp: byte;
+    cycle: u32;
+}
+
+fn hexDigit(c: char) -> u32 {
+    if c >= '0' && c <= '9' { return (u32)(c - '0'); }
+    if c >= 'A' && c <= 'F' { return (u32)(c - 'A' + 10); }
+    return (u32)(c - 'a' + 10);
+}
+
+// The hexadecimal number of `digits` digits that starts at `at`
+fn hexAt(text: char*, at: int, digits: int) -> u32 {
+    let value: u32 = 0;
+    for i in 0..digits {
+        value = value * 16 + hexDigit(text[at + i]);
+    }
+    return value;
+}
+
+// The decimal number that starts at `at` and goes to the end of the line
+fn decimalFrom(text: char*, at: int) -> u32 {
+    let value: u32 = 0;
+    let i = at;
+    while text[i] >= '0' && text[i] <= '9' {
+        value = value * 10 + (u32)(text[i] - '0');
+        i += 1;
+    }
+    return value;
+}
+
+fn parseLogLine(line: String*) -> LogState {
+    let text = line.c_str();
+    return LogState{
+        pc: (Address)hexAt(text, 0, 4),
+        a: (byte)hexAt(text, 50, 2),
+        x: (byte)hexAt(text, 55, 2),
+        y: (byte)hexAt(text, 60, 2),
+        status: (byte)hexAt(text, 65, 2),
+        sp: (byte)hexAt(text, 71, 2),
+        cycle: decimalFrom(text, 90),
+    };
+}
+
+fn matchesLog(cpu: Cpu6502*, expected: LogState*) -> bool {
+    return cpu.registers.Pc == expected.pc
+        && cpu.registers.A == expected.a
+        && cpu.registers.X == expected.x
+        && cpu.registers.Y == expected.y
+        && cpu.registers.statusRegister() == expected.status
+        && cpu.registers.Sp == expected.sp
+        && cpu.cycle == expected.cycle;
+}
+
+test "the parser reads the first line of nestest.log" {
+    let line = String::from("C000  4C F5 C5  JMP $C5F5                       A:00 X:00 Y:00 P:24 SP:FD PPU:  0, 21 CYC:7");
+    let state = parseLogLine(&line);
+
+    assert(state.pc == 0xC000 && state.a == 0x00 && state.status == 0x24 && state.sp == 0xFD, "registers");
+    assert(state.cycle == 7, "cycles");
+}
+
+test "the CPU runs the official opcodes of nestest as nestest.log says" {
+    let pak = GamePak::createFromFilePath("tests/roms/nestest/nestest.nes");
+    let bus = CpuBus::create(&pak);
+    let cpu = Cpu6502::create(&bus);
+    cpu.resetToAddress(0xC000);
+
+    let log = File::read_lines("tests/roms/nestest/nestest.log").unwrap();
+    assert(log.length() >= NESTEST_OFFICIAL_LINES, "nestest.log is complete");
+
+    let matched = 0;
+    for i in 0..NESTEST_OFFICIAL_LINES {
+        let line = log.get_ref(i);
+        let expected = parseLogLine(line);
+        if !matchesLog(&cpu, &expected) {
+            eprintln(f"nestest.log line {i + 1} differs");
+            eprintln(f"  expected: {line.c_str()}");
+            eprintln(f"  actual:   Pc:{cpu.registers.Pc:04X} A:{cpu.registers.A:02X} X:{cpu.registers.X:02X} Y:{cpu.registers.Y:02X} P:{cpu.registers.statusRegister():02X} SP:{cpu.registers.Sp:02X} CYC:{cpu.cycle}");
+            break;
+        }
+        matched += 1;
+
+        cpu.tick();
+        while !cpu.isComplete() {
+            cpu.tick();
+        }
+    }
+
+    assert(matched == NESTEST_OFFICIAL_LINES, "every official line of nestest.log matches");
+    // nestest leaves its result at 0x02 and 0x03: 0x00 means every test passed
+    assert(cpu.memory.read(0x0002) == 0x00 && cpu.memory.read(0x0003) == 0x00, "nestest reports no failure");
+}

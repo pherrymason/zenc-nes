@@ -1,0 +1,482 @@
+import "../src/nes/ppu/render.zc";
+
+// nestest.nes: NROM, horizontal mirroring, 8 KB of CHR ROM with a font
+fn loadNestest() -> GamePak {
+    return GamePak::createFromFilePath("tests/roms/nestest/nestest.nes");
+}
+
+def TILE_A: byte = 0x41;   // 'A' in nestest's font
+
+// A PPU with palettes 0, 1, 4 and 5 set, and nothing else
+fn ppuWithPalettes(pak: GamePak*) -> Ppu {
+    let ppu = Ppu::create(pak);
+    let colors: byte[8] = [0x0F, 0x16, 0x27, 0x30, 0x0F, 0x02, 0x1A, 0x38];
+    for i in 0..8 {
+        ppu.write(0x3F00 + (Address)i, colors[i]);
+    }
+    let spriteColors: byte[8] = [0x0F, 0x21, 0x22, 0x23, 0x0F, 0x14, 0x15, 0x16];
+    for i in 0..8 {
+        ppu.write(0x3F10 + (Address)i, spriteColors[i]);
+    }
+    return ppu;
+}
+
+// The first frame starts without the tiles a pre-render scanline fetches:
+// the second one is the first whole picture
+fn drawTwoFrames(ppu: Ppu*) {
+    for _ in 0..2 {
+        while !ppu.takeFrameComplete() {
+            ppu.tick();
+        }
+    }
+}
+
+// The second picture, stopping before the pre-render scanline clears the
+// sprite 0 hit and overflow flags
+fn drawUntilVblank(ppu: Ppu*) {
+    while !ppu.takeFrameComplete() {
+        ppu.tick();
+    }
+    while ppu.scanline != PPU_VBLANK_SCANLINE {
+        ppu.tick();
+    }
+}
+
+// Pixel (column, row) of a tile, from its two planes in CHR: 0-3
+fn tilePixel(ppu: Ppu*, tile: byte, column: int, row: int) -> byte {
+    let address: Address = ((Address)tile << 4) + (Address)row;
+    let bit = 7 - column;
+    let low = (ppu.read(address) >> bit) & 0x01;
+    let high = (ppu.read(address + 8) >> bit) & 0x01;
+    return (byte)((high << 1) | low);
+}
+
+fn samePixel(a: Pixel, b: Pixel) -> bool {
+    return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
+fn pixelAt(ppu: Ppu*, x: int, y: int) -> Pixel {
+    return ppu.frame.pixels[y * SCREEN_WIDTH + x];
+}
+
+// What a pixel of palette 0-7 should look like
+fn expectedColor(ppu: Ppu*, paletteNumber: byte, pixel: byte) -> Pixel {
+    let index: u16 = 0;
+    if pixel != 0 {
+        index = (u16)paletteNumber * 4 + (u16)pixel;
+    }
+    return SYSTEM_PALETTE[ppu.palette[index]];
+}
+
+// Checks the 8x8 pixels of a tile drawn with its top left corner at (x, y)
+fn tileIsDrawnAt(ppu: Ppu*, tile: byte, paletteNumber: byte, x: int, y: int, flipHorizontal: bool = false, flipVertical: bool = false) -> bool {
+    for row in 0..8 {
+        for column in 0..8 {
+            let tileColumn = column;
+            if flipHorizontal {
+                tileColumn = 7 - column;
+            }
+            let tileRow = row;
+            if flipVertical {
+                tileRow = 7 - row;
+            }
+            let expected = expectedColor(ppu, paletteNumber, tilePixel(ppu, tile, tileColumn, tileRow));
+            if !samePixel(pixelAt(ppu, x + column, y + row), expected) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+test "a tile of the nametable is drawn with its pattern and palette" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.write(0x2000 + 1, TILE_A);   // row 0, column 1
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 0, 8, 0), "the A at (8, 0)");
+}
+
+test "the attribute byte picks the palette of each 2x2 tiles" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.write(0x2000 + 1, TILE_A);    // top left 2x2: bits 1-0
+    ppu.write(0x2000 + 2, TILE_A);    // top right 2x2: bits 3-2
+    ppu.write(0x23C0, 0b00000100);    // top right uses palette 1, top left palette 0
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 0, 8, 0), "palette 0 at column 1");
+    assert(tileIsDrawnAt(&ppu, TILE_A, 1, 16, 0), "palette 1 at column 2");
+}
+
+test "PPUCTRL bit 4 takes background tiles from 0x1000" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.write(0x2000 + 1, TILE_A);
+    ppu.writeRegister(PPU_CTRL, PPU_CONTROL_BACKGROUND_TABLE);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND);
+
+    drawTwoFrames(&ppu);
+
+    // Tile 0x41 of the second table is tile 0x141 of CHR: check row 0 by hand
+    let address: Address = 0x1000 + ((Address)TILE_A << 4);
+    let low = ppu.read(address);
+    let high = ppu.read(address + 8);
+    for column in 0..8 {
+        let bit = 7 - column;
+        let pixel = (byte)((((high >> bit) & 0x01) << 1) | ((low >> bit) & 0x01));
+        assert(samePixel(pixelAt(&ppu, 8 + column, 0), expectedColor(&ppu, 0, pixel)), "row 0 from 0x1000");
+    }
+}
+
+test "a PPUSCROLL X of 3 moves the picture 3 pixels to the left" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.write(0x2000 + 1, TILE_A);
+    ppu.writeRegister(PPU_SCROLL, 3);
+    ppu.writeRegister(PPU_SCROLL, 0);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND | PPU_MASK_BACKGROUND_LEFT);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 0, 8 - 3, 0), "the A at (5, 0)");
+}
+
+test "a PPUSCROLL Y of 2 moves the picture 2 pixels up" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.write(0x2000 + 32 + 1, TILE_A);   // row 1, column 1
+    ppu.writeRegister(PPU_SCROLL, 0);
+    ppu.writeRegister(PPU_SCROLL, 2);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 0, 8, 8 - 2), "the A at (8, 6)");
+}
+
+// Not in Go
+test "without PPUMASK bit 1 the 8 leftmost pixels show the backdrop" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.write(0x2000, TILE_A);   // column 0
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND);
+
+    drawTwoFrames(&ppu);
+
+    let backdrop = SYSTEM_PALETTE[ppu.palette[0]];
+    for y in 0..8 {
+        for x in 0..8 {
+            assert(samePixel(pixelAt(&ppu, x, y), backdrop), "backdrop");
+        }
+    }
+
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND | PPU_MASK_BACKGROUND_LEFT);
+    drawTwoFrames(&ppu);
+    assert(tileIsDrawnAt(&ppu, TILE_A, 0, 0, 0), "with bit 1, the A at (0, 0)");
+}
+
+// Not in Go
+test "greyscale keeps only the grey column of each colour" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.write(0x3F00, 0x16);   // a red backdrop
+    ppu.writeRegister(PPU_MASK, PPU_MASK_GREYSCALE);
+
+    drawTwoFrames(&ppu);
+
+    assert(samePixel(pixelAt(&ppu, 100, 100), SYSTEM_PALETTE[0x10]), "0x16 shows as 0x10");
+}
+
+// Not in Go: what full_palette.nes relies on
+test "with rendering off and v in the palette, the backdrop is the colour v points at" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.v.value = 0x3F06;
+
+    drawTwoFrames(&ppu);
+
+    assert(samePixel(pixelAt(&ppu, 0, 0), SYSTEM_PALETTE[ppu.palette[6]]), "0x3F06 instead of 0x3F00");
+}
+
+// Not in Go, where the skip only looked at the background bit
+test "while rendering, odd frames are one dot shorter" {
+    let pak = loadNestest();
+    let ppu = ppuWithPalettes(&pak);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);   // sprites alone also count as rendering
+
+    let dots: u32 = 0;
+    for _ in 0..2 {
+        while !ppu.takeFrameComplete() {
+            ppu.tick();
+            dots += 1;
+        }
+    }
+    assert(dots == 341 * 262 * 2 - 1, "an even frame and an odd one");
+}
+
+// --- Sprites ---
+
+def TILE_B: byte = 0x42;
+def TILE_C: byte = 0x43;
+
+fn setSprite(ppu: Ppu*, index: int, y: byte, tile: byte, attributes: byte, x: byte) {
+    ppu.oam[index * 4] = y;
+    ppu.oam[index * 4 + 1] = tile;
+    ppu.oam[index * 4 + 2] = attributes;
+    ppu.oam[index * 4 + 3] = x;
+}
+
+// Every sprite off screen: Y 0xFF never covers a visible scanline
+fn hideAllSprites(ppu: Ppu*) {
+    for i in 0..64 {
+        ppu.oam[i * 4] = 0xFF;
+    }
+}
+
+fn ppuWithSprites(pak: GamePak*) -> Ppu {
+    let ppu = ppuWithPalettes(pak);
+    hideAllSprites(&ppu);
+    return ppu;
+}
+
+// From Go: Test_loadSpritesShifters_should_render_sprite_line_no_flipping
+test "a sprite is drawn from the scanline after its Y" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    setSprite(&ppu, 0, 10, TILE_A, 0, 20);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 4, 20, 11), "the A at (20, 11) with palette 4");
+}
+
+// From Go: the three flipping tests of loadSpritesShifters
+test "attribute bits 6 and 7 flip the sprite" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    setSprite(&ppu, 0, 10, TILE_A, SPRITE_FLIP_HORIZONTAL, 20);
+    setSprite(&ppu, 1, 10, TILE_A, SPRITE_FLIP_VERTICAL, 40);
+    setSprite(&ppu, 2, 10, TILE_A, SPRITE_FLIP_HORIZONTAL | SPRITE_FLIP_VERTICAL, 60);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 4, 20, 11, true, false), "horizontal");
+    assert(tileIsDrawnAt(&ppu, TILE_A, 4, 40, 11, false, true), "vertical");
+    assert(tileIsDrawnAt(&ppu, TILE_A, 4, 60, 11, true, true), "both");
+}
+
+// Not in Go, which used 3 bits and could reach palette 8 and up
+test "only attribute bits 0-1 pick the sprite palette" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    setSprite(&ppu, 0, 10, TILE_A, 0x1D, 20);   // palette bits 01, and bits 2-4 set
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 5, 20, 11), "palette 5");
+}
+
+// The colour expected where a sprite pixel and a background pixel meet
+fn layeredColor(ppu: Ppu*, background: byte, sprite: byte, spriteInFront: bool) -> Pixel {
+    if sprite != 0 && (background == 0 || spriteInFront) {
+        return expectedColor(ppu, 4, sprite);
+    }
+    return expectedColor(ppu, 0, background);
+}
+
+fn layersAreDrawn(ppu: Ppu*, spriteInFront: bool) -> bool {
+    for row in 0..8 {
+        for column in 0..8 {
+            let expected = layeredColor(ppu, tilePixel(ppu, TILE_A, column, row), tilePixel(ppu, TILE_B, column, row), spriteInFront);
+            if !samePixel(pixelAt(ppu, 24 + column, 16 + row), expected) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Not in Go, where priority was a TODO
+test "a sprite is in front of the background unless attribute bit 5 is set" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    ppu.write(0x2000 + 2 * 32 + 3, TILE_A);   // background A at (24, 16)
+    setSprite(&ppu, 0, 15, TILE_B, 0, 24);     // sprite B over it
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND | PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+    assert(layersAreDrawn(&ppu, true), "B in front of A");
+
+    ppu.oam[2] = SPRITE_BEHIND_BACKGROUND;
+    drawTwoFrames(&ppu);
+    assert(layersAreDrawn(&ppu, false), "B behind A: only where A is transparent");
+}
+
+test "a sprite earlier in OAM is in front of a later one" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    setSprite(&ppu, 3, 10, TILE_A, 0, 20);   // palette 4
+    setSprite(&ppu, 7, 10, TILE_A, 1, 20);   // palette 5, same place
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 4, 20, 11), "sprite 3 wins");
+}
+
+// Not in Go, which did not set the flag
+test "only 8 sprites are drawn per scanline, and a 9th sets the overflow flag" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    for i in 0..9 {
+        setSprite(&ppu, i, 10, TILE_A, 0, (byte)(i * 16));
+    }
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES | PPU_MASK_SPRITES_LEFT);
+
+    drawUntilVblank(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_A, 4, 7 * 16, 11), "the 8th is drawn");
+    let backdrop = SYSTEM_PALETTE[ppu.palette[0]];
+    for column in 0..8 {
+        assert(samePixel(pixelAt(&ppu, 8 * 16 + column, 12), backdrop), "the 9th is not");
+    }
+    assert((ppu.status & PPU_STATUS_SPRITE_OVERFLOW) != 0, "overflow");
+}
+
+// Not in Go
+test "without PPUMASK bit 2 sprites are hidden in the 8 leftmost pixels" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    setSprite(&ppu, 0, 10, TILE_A, 0, 0);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+
+    let backdrop = SYSTEM_PALETTE[ppu.palette[0]];
+    for row in 0..8 {
+        for column in 0..8 {
+            assert(samePixel(pixelAt(&ppu, column, 11 + row), backdrop), "hidden");
+        }
+    }
+}
+
+// Not in Go, where 8x16 was a TODO
+test "8x16 sprites take the even tile on top and the next one below" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    setSprite(&ppu, 0, 10, TILE_B, 0, 20);
+    // Bit 3 is ignored in 8x16: bit 0 of the tile picks the table
+    ppu.writeRegister(PPU_CTRL, PPU_CONTROL_SPRITE_8X16 | PPU_CONTROL_SPRITE_TABLE);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_B, 4, 20, 11), "B on top");
+    assert(tileIsDrawnAt(&ppu, TILE_C, 4, 20, 19), "C below");
+}
+
+test "flipping an 8x16 sprite vertically swaps its halves" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    setSprite(&ppu, 0, 10, TILE_B, SPRITE_FLIP_VERTICAL, 20);
+    ppu.writeRegister(PPU_CTRL, PPU_CONTROL_SPRITE_8X16);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, TILE_C, 4, 20, 11, false, true), "C flipped on top");
+    assert(tileIsDrawnAt(&ppu, TILE_B, 4, 20, 19, false, true), "B flipped below");
+}
+
+// nestest's second pattern table is empty: with bit 3 the A disappears
+test "PPUCTRL bit 3 takes 8x8 sprites from 0x1000" {
+    let pak = loadNestest();
+    let ppu = ppuWithSprites(&pak);
+    setSprite(&ppu, 0, 10, TILE_A, 0, 20);
+    ppu.writeRegister(PPU_CTRL, PPU_CONTROL_SPRITE_TABLE);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_SPRITES);
+
+    drawTwoFrames(&ppu);
+
+    assert(tileIsDrawnAt(&ppu, 0x00, 4, 20, 11) && !tileIsDrawnAt(&ppu, TILE_A, 4, 20, 11), "an empty tile");
+}
+
+// --- Sprite 0 hit ---
+
+fn ppuForSpriteZeroHit(pak: GamePak*) -> Ppu {
+    let ppu = ppuWithSprites(pak);
+    ppu.write(0x2000 + 32 + 1, TILE_A);   // background A at (8, 8)
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND | PPU_MASK_SPRITES);
+    return ppu;
+}
+
+fn hasSpriteZeroHit(ppu: Ppu*) -> bool {
+    return (ppu.status & PPU_STATUS_SPRITE_ZERO_HIT) != 0;
+}
+
+// From Go: Test_checkSprite0Hit_should_enable_flag_if_sprite_0_hits_opaque_background_pixel
+// (which expected the flag to stay clear)
+test "sprite 0 over an opaque background pixel sets the sprite 0 hit" {
+    let pak = loadNestest();
+    let ppu = ppuForSpriteZeroHit(&pak);
+    setSprite(&ppu, 0, 7, TILE_A, 0, 8);
+
+    drawUntilVblank(&ppu);
+
+    assert(hasSpriteZeroHit(&ppu), "hit");
+}
+
+// Not in Go, which only compared Y and X
+test "sprite 0 over transparent background does not hit" {
+    let pak = loadNestest();
+    let ppu = ppuForSpriteZeroHit(&pak);
+    setSprite(&ppu, 0, 7, TILE_A, 0, 100);   // no background there
+
+    drawUntilVblank(&ppu);
+
+    assert(!hasSpriteZeroHit(&ppu), "no hit");
+}
+
+// Not in Go, which looked at the first sprite of the scanline, not at sprite 0
+test "only sprite 0 sets the hit" {
+    let pak = loadNestest();
+    let ppu = ppuForSpriteZeroHit(&pak);
+    setSprite(&ppu, 1, 7, TILE_A, 0, 8);   // sprite 0 stays off screen
+
+    drawUntilVblank(&ppu);
+
+    assert(!hasSpriteZeroHit(&ppu), "no hit");
+}
+
+// From Go: Test_checkSprite0Hit_should_not_enable_flag_if_sprite_rendering_is_disabled
+test "without sprite rendering there is no hit" {
+    let pak = loadNestest();
+    let ppu = ppuForSpriteZeroHit(&pak);
+    setSprite(&ppu, 0, 7, TILE_A, 0, 8);
+    ppu.writeRegister(PPU_MASK, PPU_MASK_BACKGROUND);
+
+    drawUntilVblank(&ppu);
+
+    assert(!hasSpriteZeroHit(&ppu), "no hit");
+}
+
+test "the sprite 0 hit is cleared by the pre-render scanline" {
+    let pak = loadNestest();
+    let ppu = ppuForSpriteZeroHit(&pak);
+    setSprite(&ppu, 0, 7, TILE_A, 0, 8);
+    drawUntilVblank(&ppu);
+    assert(hasSpriteZeroHit(&ppu), "hit");
+
+    ppu.oam[0] = 0xFF;   // move sprite 0 off screen
+    drawUntilVblank(&ppu);
+    assert(!hasSpriteZeroHit(&ppu), "cleared, and no new hit");
+}
